@@ -1,0 +1,163 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 174a549..f848312 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -34,6 +34,7 @@ license = "Apache-2.0"
+ repository = "https://github.com/rcore-os/tgoskits"
+ 
+ [features]
++fah-vfio = []
+ 
+ [lib]
+ name = "dma_api"
+diff --git a/src/array.rs b/src/array.rs
+index c0cafa3..3da73da 100644
+--- a/src/array.rs
++++ b/src/array.rs
+@@ -132,7 +132,7 @@ impl<T> DArray<T> {
+         unsafe {
+             let offset = index * core::mem::size_of::<T>();
+             self.data.prepare_read(offset, core::mem::size_of::<T>());
+-            Some(self.data.handle.cpu_addr.cast().add(index).read())
++            Some(self.data.handle.cpu_addr.cast().add(index).read_volatile())
+         }
+     }
+ 
+@@ -161,7 +161,7 @@ impl<T> DArray<T> {
+         unsafe {
+             let offset = index * core::mem::size_of::<T>();
+             let ptr = self.data.handle.cpu_addr.cast::<T>().add(index);
+-            ptr.write(value);
++            ptr.write_volatile(value);
+             self.data.confirm_write(offset, core::mem::size_of::<T>());
+         }
+     }
+@@ -202,7 +202,9 @@ impl<T> DArray<T> {
+         unsafe {
+             let dst_ptr = self.data.handle.cpu_addr.as_ptr();
+             let len = core::mem::size_of_val(src);
+-            dst_ptr.copy_from_nonoverlapping(src.as_ptr() as *const u8, len);
++            for index in 0..len {
++                dst_ptr.add(index).write_volatile((src.as_ptr() as *const u8).add(index).read());
++            }
+         }
+         self.data.confirm_write_all();
+     }
+@@ -247,6 +249,7 @@ impl<T> DArray<T> {
+ 
+     /// 直接借出一段可写切片，并在闭包返回后自动同步缓存。
+     pub fn write_with<R>(&mut self, len: usize, f: impl FnOnce(&mut [T]) -> R) -> R {
++        assert!(!cfg!(feature = "fah-vfio"), "References to VFIO-mapped storage are disabled");
+         assert!(
+             len <= self.len(),
+             "range out of bounds, len: {}, array len: {}",
+@@ -263,6 +266,7 @@ impl<T> DArray<T> {
+ 
+     /// 直接借出一段只读切片，并在闭包调用前自动同步缓存。
+     pub fn read_with<R>(&self, len: usize, f: impl FnOnce(&[T]) -> R) -> R {
++        assert!(!cfg!(feature = "fah-vfio"), "References to VFIO-mapped storage are disabled");
+         assert!(
+             len <= self.len(),
+             "range out of bounds, len: {}, array len: {}",
+@@ -278,6 +282,7 @@ impl<T> DArray<T> {
+     ///
+     /// slice will not auto do cache sync operations.
+     pub unsafe fn as_mut_slice(&mut self) -> &mut [T] {
++        assert!(!cfg!(feature = "fah-vfio"), "References to VFIO-mapped storage are disabled");
+         let ptr = self.data.handle.cpu_addr;
+         unsafe {
+             core::slice::from_raw_parts_mut(
+diff --git a/src/common.rs b/src/common.rs
+index 0bdc4cb..1020b29 100644
+--- a/src/common.rs
++++ b/src/common.rs
+@@ -19,7 +19,7 @@ impl DCommon {
+         let handle = unsafe { os.alloc_coherent(layout) }?;
+         let ptr = handle.cpu_addr;
+         unsafe {
+-            ptr.write_bytes(0, handle.size());
++            for index in 0..handle.size() { ptr.as_ptr().add(index).write_volatile(0); }
+         }
+         os.flush_invalidate(ptr, handle.size());
+ 
+@@ -34,6 +34,7 @@ impl DCommon {
+     }
+ 
+     pub fn as_mut_slice(&mut self) -> &mut [u8] {
++        assert!(!cfg!(feature = "fah-vfio"), "References to VFIO-mapped storage are disabled");
+         unsafe {
+             core::slice::from_raw_parts_mut(self.handle.cpu_addr.as_ptr(), self.handle.size())
+         }
+diff --git a/src/dbox.rs b/src/dbox.rs
+index 4a222e4..304bc0c 100644
+--- a/src/dbox.rs
++++ b/src/dbox.rs
+@@ -107,7 +107,7 @@ impl<T> DBox<T> {
+         unsafe {
+             self.data.prepare_read(0, core::mem::size_of::<T>());
+             let ptr = self.data.handle.cpu_addr.cast::<T>();
+-            ptr.read()
++            ptr.read_volatile()
+         }
+     }
+ 
+@@ -123,7 +123,7 @@ impl<T> DBox<T> {
+     pub fn write(&mut self, value: T) {
+         unsafe {
+             let ptr = self.data.handle.cpu_addr.cast::<T>();
+-            ptr.write(value);
++            ptr.write_volatile(value);
+             self.data.confirm_write(0, core::mem::size_of::<T>());
+         }
+     }
+@@ -164,6 +164,7 @@ impl<T> DBox<T> {
+     /// - 调用者必须确保在使用该切片期间，设备不会访问此内存区域
+     /// - 调用者必须手动处理缓存同步（flush/invalidate）
+     pub unsafe fn as_buff_mut(&mut self) -> &mut [u8] {
++        assert!(!cfg!(feature = "fah-vfio"), "References to VFIO-mapped storage are disabled");
+         self.data.as_mut_slice()
+     }
+ }
+diff --git a/src/lib.rs b/src/lib.rs
+index bc1fab0..f26466f 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -398,6 +398,15 @@ impl DeviceDma {
+         SArrayPtr::map_single(self, buff, align, direction)
+     }
+ 
++    /// Map CPU-owned raw storage; see SArrayPtr::map_raw safety requirements.
++    /// # Safety
++    /// Storage must remain valid and unavailable to conflicting accesses until
++    /// DMA completion and mapping retirement. Uses the platform mapping policy.
++    pub unsafe fn map_single_raw<T>(&self, addr: NonNull<T>, count: usize,
++        align: usize, direction: DmaDirection) -> Result<SArrayPtr<T>, DmaError> {
++        unsafe { SArrayPtr::map_raw(self, addr, count, align, direction) }
++    }
++
+     pub fn new_pool(
+         &self,
+         layout: core::alloc::Layout,
+diff --git a/src/map_single.rs b/src/map_single.rs
+index a3c0478..323f39e 100644
+--- a/src/map_single.rs
++++ b/src/map_single.rs
+@@ -71,6 +71,18 @@ impl<T> SArrayPtr<T> {
+         })
+     }
+ 
++    /// Map CPU-owned raw storage without constructing a reference.
++    /// # Safety
++    /// `addr` must remain allocated for `count` valid T elements until terminal
++    /// completion/unmap. The caller must serialize CPU/device access.
++    pub unsafe fn map_raw(os: &DeviceDma, addr: NonNull<T>, count: usize,
++        align: usize, direction: DmaDirection) -> Result<Self, DmaError> {
++        let bytes = count.checked_mul(core::mem::size_of::<T>()).ok_or(DmaError::ZeroSizedBuffer)?;
++        let size = NonZeroUsize::new(bytes).ok_or(DmaError::ZeroSizedBuffer)?;
++        let handle = unsafe { os._map_single(addr.cast(), size, align, direction)? };
++        Ok(Self {handle, osal: os.clone(), direction, _marker: core::marker::PhantomData})
++    }
++
+     /// 从 slice 复制数据到映射的缓冲区。
+     ///
+     /// 复制完成后刷新整个缓冲区的 CPU 缓存（ToDevice/Bidirectional）。

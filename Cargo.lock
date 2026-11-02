@@ -182,8 +182,6 @@ dependencies = [
 [[package]]
 name = "dma-api"
 version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ce802d0c429c6966bea151e8e78eb5906d5b5e2cdebd0e960097cbe3654a3db"
 dependencies = [
  "aarch64-cpu-ext",
  "cfg-if",
