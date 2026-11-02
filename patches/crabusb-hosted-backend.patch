@@ -1,0 +1,29 @@
+diff --git a/usb-host/Cargo.toml b/usb-host/Cargo.toml
+index 9921b1d..4a56fbc 100644
+--- a/usb-host/Cargo.toml
++++ b/usb-host/Cargo.toml
+@@ -10,6 +10,7 @@ repository = "https://github.com/drivercraft/CrabUSB"
+ version = "0.9.1"
+ 
+ [features]
++hosted-direct = []
+ aggressive_usb_reset = []
+ default = ["aggressive_usb_reset"]
+ libusb = ["libusb1-sys"]
+diff --git a/usb-host/build.rs b/usb-host/build.rs
+index f8cc9f1..7cd405e 100644
+--- a/usb-host/build.rs
++++ b/usb-host/build.rs
+@@ -3,7 +3,11 @@ fn main() {
+     println!("cargo::rustc-check-cfg=cfg(kmod)");
+ 
+     let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+-    if os == "none" {
++    let hosted = std::env::var("CARGO_FEATURE_HOSTED_DIRECT").is_ok();
++    if hosted && std::env::var("CARGO_FEATURE_LIBUSB").is_ok() {
++        panic!("hosted-direct and libusb are mutually exclusive");
++    }
++    if os == "none" || hosted {
+         println!("cargo::rustc-cfg=kmod");
+     } else if std::env::var("CARGO_FEATURE_LIBUSB").is_ok() {
+         println!("cargo::rustc-cfg=umod");

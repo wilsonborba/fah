@@ -30,7 +30,7 @@ FAH also targets broader USB protocol research and controller diagnostics. Succe
 
 The Rust application foundation is implemented. Help, version, argument validation, and non-hardware CI are available. The USB driver is not implemented yet.
 
-Build and check with `cargo check --locked`, `cargo test --locked`, and `cargo run -- --help`. Hardware operations are not available in this foundation.
+Prepare pinned sources with `python3 scripts/prepare-dependencies.py`. Then build and check with `cargo check --locked`, `cargo test --locked`, and `cargo run -- --help`. Hardware operations are not available in this foundation.
 
 ---
 
