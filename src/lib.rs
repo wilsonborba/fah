@@ -7,3 +7,6 @@ pub mod presentation;
 
 #[path = "../lib/dal/mod.rs"]
 pub mod dal;
+
+#[path = "../lib/domain/mod.rs"]
+pub mod domain;
