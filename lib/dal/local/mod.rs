@@ -49,3 +49,6 @@
 //! not ordering, aliasing, or lifetime obligations.
 
 pub mod iova;
+
+#[cfg(feature = "hosted-direct")]
+pub mod dma;
