@@ -200,7 +200,7 @@ index 7efe34d..9354d97 100644
              )
          } else {
 diff --git a/usb-host/src/backend/kmod/xhci/device.rs b/usb-host/src/backend/kmod/xhci/device.rs
-index a7996fc..92f12d8 100644
+index a7996fc..0a0a748 100644
 --- a/usb-host/src/backend/kmod/xhci/device.rs
 +++ b/usb-host/src/backend/kmod/xhci/device.rs
 @@ -161,13 +161,7 @@ impl Device {
@@ -250,7 +250,24 @@ index a7996fc..92f12d8 100644
              .await?;
  
          debug!("Address slot ok {result:x?}");
-@@ -528,7 +530,7 @@ impl Device {
+@@ -348,12 +350,10 @@ impl Device {
+     async fn get_device_descriptor_base(&mut self) -> Result<DeviceDescriptorBase> {
+         let mut data = vec![0u8; 8];
+ 
+-        // DMA 传输
+-        self.control_endpoint_mut()
+-            .get_descriptor(DescriptorType::DEVICE, 0, 0, data.as_mut_slice())
+-            .await?;
+-
+-        let desc = unsafe { *(data.as_mut_slice().as_ptr() as *const DeviceDescriptorBase) };
++        let actual=self.control_endpoint_mut()
++            .get_descriptor(DescriptorType::DEVICE,0,0,&mut data).await?;
++        let data=crate::backend::ty::ep::ctrl::checked_descriptor_bytes(&data,actual,8,1,18)?;
++        let desc=DeviceDescriptorBase {length:data[0],descriptor_type:data[1],usb_version:u16::from_le_bytes([data[2],data[3]]),class:data[4],subclass:data[5],protocol:data[6],max_packet_size_0:data[7]};
+ 
+         Ok(desc)
+     }
+@@ -528,7 +528,7 @@ impl Device {
              input
                  .device_mut()
                  .slot_mut()
@@ -259,7 +276,7 @@ index a7996fc..92f12d8 100644
          });
          mb();
  
-@@ -765,3 +767,59 @@ impl DeviceOp for Device {
+@@ -765,3 +765,59 @@ impl DeviceOp for Device {
          self.update_hub_inner(params).boxed()
      }
  }
@@ -676,6 +693,98 @@ index 7ea3969..bd6e0cf 100644
              trace!(
                  "xhci: dispatch transfer event slot={} ep={} ptr={:#x} code={:?} len={}",
                  slot_id,
+diff --git a/usb-host/src/backend/ty/ep/ctrl.rs b/usb-host/src/backend/ty/ep/ctrl.rs
+index fba5106..c3cef2f 100644
+--- a/usb-host/src/backend/ty/ep/ctrl.rs
++++ b/usb-host/src/backend/ty/ep/ctrl.rs
+@@ -65,8 +65,8 @@ impl Endpoint {
+ 
+     pub async fn get_device_descriptor(&mut self) -> Result<DeviceDescriptor, USBError> {
+         let mut buff = alloc::vec![0u8; DeviceDescriptor::LEN];
+-        self.get_descriptor(DescriptorType::DEVICE, 0, 0, &mut buff)
+-            .await?;
++        let actual=self.get_descriptor(DescriptorType::DEVICE, 0, 0, &mut buff).await?;
++        let buff=checked_descriptor_bytes(&buff,actual,DeviceDescriptor::LEN,1,18)?;
+         trace!("data: {buff:?}");
+         let desc = DeviceDescriptor::parse(&buff).ok_or(anyhow!("device descriptor parse err"))?;
+ 
+@@ -94,16 +94,55 @@ impl Endpoint {
+         index: u8,
+     ) -> Result<ConfigurationDescriptor, USBError> {
+         let mut header = alloc::vec![0u8; ConfigurationDescriptor::LEN];
+-        self.get_descriptor(DescriptorType::CONFIGURATION, index, 0, &mut header)
+-            .await?;
+-
+-        let total_length = u16::from_le_bytes(header[2..4].try_into().unwrap()) as usize;
++        let actual=self.get_descriptor(DescriptorType::CONFIGURATION,index,0,&mut header).await?;
++        let header=checked_descriptor_bytes(&header,actual,9,2,9)?;
++        let total_length=checked_configuration_length(header)?;
+         let mut full_data = alloc::vec![0u8; total_length];
+         debug!("Reading configuration descriptor for index {index}, total length: {total_length}");
+-        self.get_descriptor(DescriptorType::CONFIGURATION, index, 0, &mut full_data)
+-            .await?;
+-
+-        ConfigurationDescriptor::parse(&full_data)
++        let actual=self.get_descriptor(DescriptorType::CONFIGURATION,index,0,&mut full_data).await?;
++        let full_data=checked_descriptor_bytes(&full_data,actual,total_length,2,9)?;
++        if checked_configuration_length(full_data)?!=total_length {return Err(USBError::InvalidParameter);}
++        validate_configuration_chain(full_data)?;
++        ConfigurationDescriptor::parse(full_data)
+             .ok_or_else(|| anyhow!("config descriptor parse err").into())
+     }
+ }
++
++pub(crate) fn checked_descriptor_bytes(bytes:&[u8],actual:usize,required:usize,kind:u8,declared:u8)->Result<&[u8],USBError> {
++    if actual<required || actual>bytes.len() || actual<2 || bytes[0]!=declared || bytes[1]!=kind {return Err(USBError::InvalidParameter);}
++    Ok(&bytes[..actual])
++}
++fn checked_configuration_length(bytes:&[u8])->Result<usize,USBError> {
++    if bytes.len()<9 {return Err(USBError::InvalidParameter);}
++    let total=u16::from_le_bytes([bytes[2],bytes[3]])as usize;
++    if total<9 {return Err(USBError::InvalidParameter);}Ok(total)
++}
++pub(crate) fn validate_configuration_chain(bytes:&[u8])->Result<(),USBError> {
++    let mut offset=0;
++    while offset<bytes.len() {
++        if bytes.len()-offset<2 {return Err(USBError::InvalidParameter);}
++        let length=bytes[offset]as usize;
++        let minimum=match bytes[offset+1] {2|4=>9,5=>7,_=>2};
++        if length<minimum || length>bytes.len()-offset {return Err(USBError::InvalidParameter);}
++        offset+=length;
++    }Ok(())
++}
++#[cfg(test)]
++mod descriptor_length_tests {
++    use super::*;
++    #[test]
++    fn short_reads_never_parse_padding_or_unchecked_totals() {
++        let mut device=[0u8;18];device[0]=18;device[1]=1;
++        assert!(checked_descriptor_bytes(&device,8,18,1,18).is_err());
++        assert!(checked_descriptor_bytes(&device,18,18,1,18).is_ok());
++        assert!(checked_descriptor_bytes(&device,19,18,1,18).is_err());
++        assert!(checked_descriptor_bytes(&device,8,8,1,18).is_ok());
++        let mut config=[9,2,11,0,0,1,0,128,0,2,255];
++        assert_eq!(checked_configuration_length(&config).unwrap(),11);
++        assert!(checked_descriptor_bytes(&config,9,11,2,9).is_err());
++        assert!(validate_configuration_chain(&config).is_ok());
++        config[9]=0;assert!(validate_configuration_chain(&config).is_err());
++        config[2]=8;assert!(checked_configuration_length(&config).is_err());
++        config[1]=1;assert!(checked_descriptor_bytes(&config,11,9,2,9).is_err());
++    }
++}
+diff --git a/usb-host/src/backend/ty/ep/mod.rs b/usb-host/src/backend/ty/ep/mod.rs
+index a176905..949c067 100644
+--- a/usb-host/src/backend/ty/ep/mod.rs
++++ b/usb-host/src/backend/ty/ep/mod.rs
+@@ -17,7 +17,7 @@ use usb_if::{
+ 
+ use super::transfer::Transfer;
+ 
+-mod ctrl;
++pub(crate) mod ctrl;
+ 
+ pub(crate) trait EndpointOp: Send + Any + 'static {
+     fn submit_request(&mut self, request: TransferRequest) -> Result<RequestId, TransferError>;
 diff --git a/usb-host/src/host.rs b/usb-host/src/host.rs
 index 63c6152..a73efd2 100644
 --- a/usb-host/src/host.rs
