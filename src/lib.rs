@@ -4,3 +4,6 @@ pub mod app;
 pub mod core;
 #[path = "../lib/presentation/mod.rs"]
 pub mod presentation;
+
+#[path = "../lib/dal/mod.rs"]
+pub mod dal;
