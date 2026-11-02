@@ -174,7 +174,7 @@ impl<B: DeviceBackend> UsbSession<B> {
         let device = self.device(id)?.clone();
         self.fresh_port(device.port)?;
         if device.state != DeviceState::SlotEnabled
-            && !(device.state == DeviceState::DefaultAddress && !bsr)
+            && (device.state != DeviceState::DefaultAddress || bsr)
         {
             return Err(OperationError::validation("invalid address transition"));
         }
