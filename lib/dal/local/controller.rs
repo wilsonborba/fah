@@ -44,6 +44,19 @@ impl LocalController {
             pump: None,
         }
     }
+    pub fn port_count(&self) -> Result<u8, OperationError> {
+        self.host
+            .as_ref()
+            .map(|host| host.port_count())
+            .ok_or_else(|| OperationError::validation("controller is not initialized"))
+    }
+    pub fn port_status(&self, number: u8) -> Result<u32, OperationError> {
+        self.host
+            .as_ref()
+            .ok_or_else(|| OperationError::validation("controller is not initialized"))?
+            .port_status(number)
+            .map_err(|e| os_error(format!("{e:?}")))
+    }
     fn initialize_inner(&mut self) -> Result<(), String> {
         if self.host.is_some() || self.adapter.is_some() {
             return Err("initialization already attempted; close/recover first".into());

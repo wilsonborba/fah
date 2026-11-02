@@ -85,10 +85,10 @@ index 71b939e..4ab690c 100644
 -    }
 -}
 diff --git a/usb-host/src/backend/kmod/mod.rs b/usb-host/src/backend/kmod/mod.rs
-index e17466d..fe8a849 100644
+index e17466d..bf30364 100644
 --- a/usb-host/src/backend/kmod/mod.rs
 +++ b/usb-host/src/backend/kmod/mod.rs
-@@ -50,3 +50,22 @@ pub struct DeviceAddressInfo {
+@@ -50,3 +50,34 @@ pub struct DeviceAddressInfo {
      pub port_id: u8,
      pub infos: BTreeMap<Id<Hub>, HubInfo>,
  }
@@ -107,6 +107,18 @@ index e17466d..fe8a849 100644
 +        Ok(Self {core:Xhci::new(mmio,kernel)?})
 +    }
 +    pub async fn initialize(&mut self)->Result<()> {self.core.init().await}
++    pub fn port_count(&self)->u8 {self.core.reg.read().port_register_set.len() as u8}
++    /// Read only: no PORTSC W1C acknowledgment and no discovery helper.
++    pub fn port_status(&self,number:u8)->Result<u32> {
++        let reg=self.core.reg.read();
++        if number==0 || number as usize>reg.port_register_set.len() {return Err(USBError::Other(anyhow!("invalid root port")));}
++        // PORTSC is one aligned 32-bit register per 16-byte port register set.
++        // The hosted owner validated the whole port-register span before new().
++        let operational=reg.capability.caplength.read_volatile().get() as usize;
++        let ptr=(reg.mmio_base+operational+0x400+(number as usize-1)*16) as *const u32;
++        Ok(unsafe {ptr.read_volatile()})
++    }
++
 +    pub fn event_handler(&mut self)->crate::EventHandler {
 +        crate::EventHandler::from_inner(self.core.create_event_handler())
 +    }
