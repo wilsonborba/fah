@@ -211,6 +211,7 @@ name = "fah"
 version = "0.1.0-dev"
 dependencies = [
  "crab-usb",
+ "libc",
  "serde",
  "serde_json",
  "vfio-ioctls",
