@@ -115,3 +115,19 @@ fn failed_acquisition_distinguishes_rollback_from_retained_resources() {
         assert_eq!(log.lock().unwrap().contains(&"drop"), !retained);
     }
 }
+
+#[cfg(feature = "hosted-direct")]
+#[test]
+fn backend_future_deadline_returns_recovery_error() {
+    use fah::dal::local::controller::block_until;
+    use std::time::Duration;
+    assert_eq!(
+        block_until(async { 42 }, Duration::from_secs(1)).unwrap(),
+        42
+    );
+    assert!(
+        block_until(std::future::pending::<()>(), Duration::from_millis(2))
+            .unwrap_err()
+            .contains("recovery")
+    );
+}
