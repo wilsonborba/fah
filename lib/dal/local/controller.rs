@@ -31,6 +31,7 @@ pub struct LocalController {
     pump: Option<Pump>,
     pending: std::collections::BTreeMap<u64, PendingRequest>,
     next_request: u64,
+    ring_rebuilds: u32,
 }
 impl LocalController {
     pub fn new(run_id: String) -> Self {
@@ -46,6 +47,7 @@ impl LocalController {
             pump: None,
             pending: std::collections::BTreeMap::new(),
             next_request: 1,
+            ring_rebuilds: 0,
         }
     }
     pub fn port_count(&self) -> Result<u8, OperationError> {
@@ -698,5 +700,105 @@ impl crate::domain::services::requests::RequestBackend for LocalController {
             error: None,
             quiescent: true,
         }))
+    }
+}
+
+impl crate::domain::services::recovery::RecoveryBackend for LocalController {
+    fn abort_endpoint(
+        &mut self,
+        slot: u8,
+        endpoint: u8,
+    ) -> Result<crate::domain::models::requests::BackendAbort, OperationError> {
+        use crate::domain::services::requests::RequestBackend;
+        self.check_event_pump()?;
+        if self.ring_rebuilds >= 64 {
+            return Err(OperationError::validation(
+                "ring rebuild budget reached; close/reacquire controller",
+            ));
+        }
+        let host = self
+            .host
+            .as_mut()
+            .ok_or_else(|| OperationError::validation("controller unavailable"))?;
+        // Neither publishing Stop Endpoint nor a software cancellation is proof.
+        device_future(host.stop_endpoint(slot, endpoint))?;
+        let tokens: Vec<_> = self
+            .pending
+            .iter()
+            .filter(|(_, request)| {
+                request.metadata.device.slot == slot && request.metadata.endpoint == endpoint
+            })
+            .map(|(token, _)| *token)
+            .collect();
+        let mut completed = Vec::new();
+        let mut aborted = Vec::new();
+        let mut error = None;
+        for token in &tokens {
+            match self.poll_request(*token) {
+                Ok(Some(result)) if result.quiescent && result.error.is_none() => {
+                    completed.push((*token, result))
+                }
+                Ok(_) => {}
+                Err(failure) => {
+                    error = Some(failure);
+                }
+            }
+        }
+        // Clear all CPU-side raw transfer handles only after confirmed Stop. An
+        // allocation/rebase failure cannot leave handles that might access originals.
+        if let Err(failure) = self
+            .host
+            .as_mut()
+            .unwrap()
+            .discard_stopped_requests(slot, endpoint)
+            .map_err(usb_error)
+        {
+            return Ok(crate::domain::models::requests::BackendAbort {
+                completed,
+                aborted,
+                restart_ready: false,
+                error: Some(failure),
+            });
+        }
+        for token in tokens {
+            let Some(request) = self.pending.get(&token) else {
+                continue;
+            };
+            if let Some(lease) = request.lease {
+                // SAFETY: Stop command completed, Stopped context checked, raw handles
+                // discarded. This proof applies to every buffer on the selected endpoint.
+                if let Err(message) =
+                    unsafe { self.adapter.unwrap().reclaim_lease_after_quiescence(lease) }
+                {
+                    error = Some(recovery_error(message, None));
+                    continue;
+                }
+            }
+            self.pending.remove(&token);
+            aborted.push(token);
+        }
+        let mut restart_ready = false;
+        if error.is_none() {
+            match device_future(
+                self.host
+                    .as_mut()
+                    .unwrap()
+                    .rebuild_stopped_endpoint(slot, endpoint),
+            ) {
+                Ok(()) => {
+                    self.ring_rebuilds += 1;
+                    restart_ready = true;
+                }
+                Err(failure) => {
+                    error = Some(failure);
+                }
+            }
+        }
+        Ok(crate::domain::models::requests::BackendAbort {
+            completed,
+            aborted,
+            restart_ready,
+            error,
+        })
     }
 }
