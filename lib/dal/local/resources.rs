@@ -250,3 +250,49 @@ impl GuestResources {
         Ok(Self { device, container })
     }
 }
+
+/// Register spans required by the pinned xHCI engine. Validate before creating
+/// identity-mapped accessors; an MMIO hole is never represented as valid memory.
+#[derive(Debug, Clone, Copy)]
+pub struct RegisterLayout {
+    pub operational: usize,
+    pub ports: u8,
+    pub slots: u8,
+    pub required_end: usize,
+}
+pub fn register_layout(header: &[u8], mapped_length: usize) -> Result<RegisterLayout, String> {
+    if header.len() < 32 {
+        return Err("truncated xHCI capability header".into());
+    }
+    let word = |offset| u32::from_le_bytes(header[offset..offset + 4].try_into().unwrap());
+    let operational = header[0] as usize;
+    let version = u16::from_le_bytes([header[2], header[3]]);
+    let hcs = word(4);
+    let ports = (hcs >> 24) as u8;
+    let slots = hcs as u8;
+    if operational < 32
+        || !operational.is_multiple_of(4)
+        || version < 0x100
+        || ports == 0
+        || slots == 0
+    {
+        return Err("unsupported xHCI capability layout".into());
+    }
+    let runtime = (word(24) & !31) as usize;
+    let doorbell = (word(20) & !3) as usize;
+    if runtime < operational || doorbell < operational {
+        return Err("register blocks overlap capability header".into());
+    }
+    let required_end = (operational + 0x400 + ports as usize * 16)
+        .max(runtime + 0x40)
+        .max(doorbell + (slots as usize + 1) * 4);
+    if required_end > mapped_length {
+        return Err("required xHCI registers extend beyond valid mapping".into());
+    }
+    Ok(RegisterLayout {
+        operational,
+        ports,
+        slots,
+        required_end,
+    })
+}
