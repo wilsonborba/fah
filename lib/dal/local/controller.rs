@@ -372,7 +372,11 @@ impl crate::domain::services::usb::ConfigurationBackend for LocalController {
         slot: u8,
         request: crate::domain::models::descriptors::DescriptorRequest,
     ) -> Result<Vec<u8>, OperationError> {
-        device_future(
+        let adapter = self
+            .adapter
+            .ok_or_else(|| OperationError::validation("DMA adapter unavailable"))?;
+        let epoch = adapter.allocation_epoch();
+        let bytes = device_future(
             self.host
                 .as_mut()
                 .ok_or_else(|| OperationError::validation("controller not initialized"))?
@@ -383,7 +387,21 @@ impl crate::domain::services::usb::ConfigurationBackend for LocalController {
                     request.language,
                     request.length,
                 ),
-        )
+        )?;
+        for lease in adapter.retired_streaming_since(epoch) {
+            // SAFETY: this synchronous descriptor future completed successfully;
+            // its private streaming map was created/dropped during this call.
+            // IRQ dispatch allocates/frees no maps and no other command ran.
+            unsafe { adapter.reclaim_lease_after_quiescence(lease) }.map_err(|message| {
+                OperationError {
+                    category: ErrorCategory::RecoveryRequired,
+                    message,
+                    os_code: None,
+                    completion_code: None,
+                }
+            })?;
+        }
+        Ok(bytes)
     }
     fn ep0_packet_size(&mut self, slot: u8, size: u16) -> Result<(), OperationError> {
         device_future(

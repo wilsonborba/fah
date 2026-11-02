@@ -108,7 +108,7 @@ fn failed_map_rolls_back_and_does_not_retain_storage() {
     assert!(a.last_error().is_some());
     f.fail_map.store(false, Ordering::SeqCst);
     let h = unsafe { a.alloc_coherent(u32::MAX as u64, layout) }.unwrap();
-    assert_eq!(h.dma_addr().as_u64(), 4096);
+    assert_eq!(h.dma_addr().as_u64(), 65536);
     unsafe {
         a.dealloc_coherent(h);
         a.reclaim_retired_after_quiescence().unwrap();
@@ -133,4 +133,78 @@ fn real_coherent_array_sync_does_not_require_bounce_storage() {
         adapter.reclaim_retired_after_quiescence().unwrap();
     }
     assert!(provider.maps.lock().unwrap().is_empty());
+}
+
+#[test]
+fn allocations_respect_segment_boundaries_and_reclamation_tokens() {
+    let provider = Fake::default();
+    let adapter = adapter(provider.clone());
+    for size in [1, 4096, 65535, 65536] {
+        let handle = unsafe {
+            adapter.alloc_coherent(u32::MAX as u64, Layout::from_size_align(size, 64).unwrap())
+        }
+        .unwrap();
+        let iova = handle.dma_addr().as_u64();
+        assert_eq!(iova % 65536, 0);
+        assert!((iova & 65535) + size as u64 <= 65536);
+        let lease = adapter.mapping_lease(iova).unwrap();
+        assert!(unsafe { adapter.reclaim_lease_after_quiescence(lease) }.is_err());
+        unsafe {
+            adapter.dealloc_coherent(handle);
+            adapter.reclaim_lease_after_quiescence(lease).unwrap();
+        }
+        assert!(unsafe { adapter.reclaim_lease_after_quiescence(lease) }.is_err());
+    }
+    assert!(
+        unsafe {
+            adapter.alloc_coherent(u32::MAX as u64, Layout::from_size_align(65537, 64).unwrap())
+        }
+        .is_none()
+    );
+    assert!(provider.maps.lock().unwrap().is_empty());
+}
+#[test]
+fn streaming_epoch_does_not_reclaim_older_uncertain_or_coherent_storage() {
+    let provider = Fake::default();
+    let adapter = adapter(provider.clone());
+    let mut data = [0u8; 8];
+    let pointer = NonNull::new(data.as_mut_ptr()).unwrap();
+    let map = || {
+        unsafe {
+            adapter.map_single(
+                u32::MAX as u64,
+                pointer,
+                NonZeroUsize::new(8).unwrap(),
+                64,
+                DmaDirection::FromDevice,
+            )
+        }
+        .unwrap()
+    };
+    let old = map();
+    let old_lease = adapter.mapping_lease(old.dma_addr().as_u64()).unwrap();
+    unsafe {
+        adapter.unmap_single(old);
+    }
+    let epoch = adapter.allocation_epoch();
+    let coherent =
+        unsafe { adapter.alloc_coherent(u32::MAX as u64, Layout::from_size_align(8, 64).unwrap()) }
+            .unwrap();
+    let current = map();
+    let current_lease = adapter.mapping_lease(current.dma_addr().as_u64()).unwrap();
+    unsafe {
+        adapter.dealloc_coherent(coherent);
+        adapter.unmap_single(current);
+    }
+    assert_eq!(adapter.retired_streaming_since(epoch), vec![current_lease]);
+    unsafe {
+        adapter
+            .reclaim_lease_after_quiescence(current_lease)
+            .unwrap();
+    }
+    assert_eq!(adapter.mapping_lease(old_lease.iova), Some(old_lease));
+    assert_eq!(adapter.retained_allocations(), 2);
+    unsafe {
+        adapter.reclaim_retired_after_quiescence().unwrap();
+    }
 }
