@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Prepare owned, pinned sources. Refuse unknown changes instead of overwriting them."""
+import hashlib
 import pathlib
 import subprocess
 
@@ -23,8 +24,14 @@ if git('rev-parse','HEAD',capture=True).stdout.strip() != REV:
     raise SystemExit('Unexpected source revision; refusing to patch.')
 result = subprocess.run(['git','-C',str(DEST),'apply','--reverse','--check',str(PATCH)],capture_output=True)
 if result.returncode:
-    if git('status','--porcelain',capture=True).stdout.strip():
-        raise SystemExit('Unexpected source changes; refusing to patch.')
+    diff = git('diff', '--binary', 'HEAD', capture=True).stdout
+    if git('ls-files', '--others', '--exclude-standard', capture=True).stdout.strip():
+        raise SystemExit('Unexpected untracked dependency files.')
+    if diff:
+        known = (ROOT / 'patches' / 'crabusb-previous.sha256').read_text().splitlines()
+        if hashlib.sha256(diff.encode()).hexdigest() not in known:
+            raise SystemExit('Unexpected source changes; refusing to patch.')
+        subprocess.run(['git', '-C', str(DEST), 'apply', '--reverse', '-'], input=diff, text=True, check=True)
     git('apply','--check',str(PATCH))
     git('apply',str(PATCH))
 if git('diff', '--binary', 'HEAD', capture=True).stdout != PATCH.read_text():

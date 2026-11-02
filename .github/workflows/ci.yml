@@ -19,3 +19,5 @@ jobs:
       - run: cargo clippy --locked --all-targets --features hosted-direct -- -D warnings
       - run: cargo test --locked
       - run: cargo test --locked --features hosted-direct
+      - name: Test maintained backend internals
+        run: cargo test --manifest-path .fah-cache/CrabUSB/usb-host/Cargo.toml --no-default-features --features hosted-direct --lib

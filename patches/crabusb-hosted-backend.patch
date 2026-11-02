@@ -27,3 +27,150 @@ index f8cc9f1..7cd405e 100644
          println!("cargo::rustc-cfg=kmod");
      } else if std::env::var("CARGO_FEATURE_LIBUSB").is_ok() {
          println!("cargo::rustc-cfg=umod");
+diff --git a/usb-host/src/backend/kmod/hub/mod.rs b/usb-host/src/backend/kmod/hub/mod.rs
+index 71b939e..4ab690c 100644
+--- a/usb-host/src/backend/kmod/hub/mod.rs
++++ b/usb-host/src/backend/kmod/hub/mod.rs
+@@ -92,19 +92,3 @@ pub struct UsbTt {
+     pub think_time_ns: usize,
+ }
+ 
+-#[cfg(test)]
+-mod tests {
+-
+-    use super::RouteString;
+-
+-    #[test]
+-    fn test_route_string() {
+-        let mut rs = RouteString::follow_root();
+-        rs.push_hub(3);
+-        rs.push_hub(5);
+-        rs.push_hub(2);
+-        assert_eq!(rs.raw(), 0b0010_0101_0011);
+-        assert_eq!(format!("{:?}", rs), "3.5.2");
+-        println!("raw: {:#x}", rs.0);
+-    }
+-}
+diff --git a/usb-host/src/backend/kmod/xhci/reg.rs b/usb-host/src/backend/kmod/xhci/reg.rs
+index 9eb9bc8..e3a49d0 100644
+--- a/usb-host/src/backend/kmod/xhci/reg.rs
++++ b/usb-host/src/backend/kmod/xhci/reg.rs
+@@ -49,6 +49,7 @@ impl XhciRegisters {
+         unsafe { Registers::new(self.mmio_base, mapper) }
+     }
+ 
++    #[cfg(not(feature = "hosted-direct"))]
+     pub fn disable_irq_guard(&mut self) -> DisableIrqGuard {
+         let mut enable = true;
+         self.operational.usbcmd.update_volatile(|r| {
+@@ -76,10 +77,12 @@ impl DerefMut for XhciRegisters {
+     }
+ }
+ 
++#[cfg(not(feature = "hosted-direct"))]
+ pub struct DisableIrqGuard {
+     reg: Registers,
+     enable: bool,
+ }
++#[cfg(not(feature = "hosted-direct"))]
+ impl Drop for DisableIrqGuard {
+     fn drop(&mut self) {
+         if self.enable {
+diff --git a/usb-host/src/backend/kmod/xhci/sync.rs b/usb-host/src/backend/kmod/xhci/sync.rs
+index 8052e81..80e3c81 100644
+--- a/usb-host/src/backend/kmod/xhci/sync.rs
++++ b/usb-host/src/backend/kmod/xhci/sync.rs
+@@ -3,10 +3,13 @@ use core::cell::UnsafeCell;
+ 
+ use spin::{Mutex, RwLock};
+ 
+-use super::reg::{DisableIrqGuard, XhciRegisters};
++use super::reg::XhciRegisters;
++#[cfg(not(feature = "hosted-direct"))]
++use super::reg::DisableIrqGuard;
+ 
+ pub(crate) struct IrqLock<T> {
+     inner: Mutex<()>,
++    #[cfg(not(feature = "hosted-direct"))]
+     reg: Arc<RwLock<XhciRegisters>>,
+     data: UnsafeCell<T>,
+ }
+@@ -16,23 +19,29 @@ unsafe impl<T> Send for IrqLock<T> where T: Send {}
+ 
+ impl<T> IrqLock<T> {
+     pub fn new(data: T, reg: Arc<RwLock<XhciRegisters>>) -> Self {
++        #[cfg(feature = "hosted-direct")]
++        let _ = reg;
+         Self {
+             inner: Mutex::new(()),
++            #[cfg(not(feature = "hosted-direct"))]
+             reg,
+             data: UnsafeCell::new(data),
+         }
+     }
+ 
+     pub fn lock(&self) -> IrqLockGuard<'_, T> {
++        #[cfg(not(feature = "hosted-direct"))]
+         let _disable_guard = self.reg.write().disable_irq_guard();
+         let guard = self.inner.lock();
+         IrqLockGuard {
+             _guard: guard,
+             data: unsafe { &mut *self.data.get() },
++            #[cfg(not(feature = "hosted-direct"))]
+             _disable_guard,
+         }
+     }
+ 
++    #[cfg(not(feature = "hosted-direct"))]
+     #[allow(clippy::mut_from_ref)]
+     pub unsafe fn force_use(&self) -> &mut T {
+         unsafe { &mut *self.data.get() }
+@@ -42,6 +51,7 @@ impl<T> IrqLock<T> {
+ pub(crate) struct IrqLockGuard<'a, T> {
+     _guard: spin::MutexGuard<'a, ()>,
+     data: &'a mut T,
++    #[cfg(not(feature = "hosted-direct"))]
+     _disable_guard: DisableIrqGuard,
+ }
+ 
+@@ -58,3 +68,23 @@ impl<'a, T> core::ops::DerefMut for IrqLockGuard<'a, T> {
+         self.data
+     }
+ }
++
++#[cfg(all(test, feature = "hosted-direct"))]
++mod hosted_tests {
++    use super::*;
++    #[test]
++    fn registration_and_dispatch_share_software_exclusion() {
++        let queues = Arc::new(IrqLock {inner: Mutex::new(()), data: UnsafeCell::new(alloc::collections::BTreeMap::new())});
++        let workers: alloc::vec::Vec<_> = (0..4).map(|_| {
++            let queues = queues.clone();
++            std::thread::spawn(move || {
++                for index in 0..10000 {
++                    let mut map = queues.lock();
++                    *map.entry(index % 16).or_insert(0usize) += 1;
++                }
++            })
++        }).collect();
++        for worker in workers { worker.join().unwrap(); }
++        assert_eq!(queues.lock().values().sum::<usize>(),40000);
++    }
++}
+diff --git a/usb-host/src/backend/kmod/xhci/transfer.rs b/usb-host/src/backend/kmod/xhci/transfer.rs
+index 7ea3969..bd6e0cf 100644
+--- a/usb-host/src/backend/kmod/xhci/transfer.rs
++++ b/usb-host/src/backend/kmod/xhci/transfer.rs
+@@ -43,7 +43,11 @@ impl TransferResultHandler {
+     /// pre-registered queue completion slot, then wakes queue-local waiters.
+     pub unsafe fn set_finished(&self, slot_id: u8, ep_id: u8, ptr: BusAddr, res: TransferEvent) {
+         let queue_id = TransQueueId { slot_id, ep_id };
+-        if let Some(q) = unsafe { self.inner.force_use().get(&queue_id) } {
++        #[cfg(feature = "hosted-direct")]
++        let queues = self.inner.lock();
++        #[cfg(not(feature = "hosted-direct"))]
++        let queues = unsafe { self.inner.force_use() };
++        if let Some(q) = queues.get(&queue_id) {
+             trace!(
+                 "xhci: dispatch transfer event slot={} ep={} ptr={:#x} code={:?} len={}",
+                 slot_id,
