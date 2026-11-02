@@ -8,6 +8,9 @@ struct State {
     trace: Vec<String>,
     status: u32,
     fail: Option<&'static str>,
+    next_token: u64,
+    pending: std::collections::BTreeMap<u64, fah::domain::models::requests::OwnedRequest>,
+    completions: std::collections::BTreeMap<u64, fah::domain::models::requests::BackendCompletion>,
 }
 struct Fake(Arc<Mutex<State>>);
 impl Fake {
@@ -44,7 +47,11 @@ impl ControllerBackend for Fake {
         }
     }
     fn close(&mut self) -> Result<(), OperationError> {
-        self.effect("close")
+        self.effect("close")?;
+        let mut state = self.0.lock().unwrap();
+        state.pending.clear();
+        state.completions.clear();
+        Ok(())
     }
 }
 impl DeviceBackend for Fake {
@@ -240,4 +247,214 @@ fn configuration_and_host_setup_are_independent_explicit_effects() {
             "endpoints:0:0"
         ]
     );
+}
+
+use fah::domain::{
+    models::{RequestState, requests::*},
+    services::requests::RequestBackend,
+};
+impl RequestBackend for Fake {
+    fn submit_request(&mut self, request: OwnedRequest) -> Result<u64, OperationError> {
+        self.effect("submit")?;
+        let mut state = self.0.lock().unwrap();
+        state.next_token += 1;
+        let token = state.next_token;
+        state.pending.insert(token, request);
+        Ok(token)
+    }
+    fn poll_request(&mut self, token: u64) -> Result<Option<BackendCompletion>, OperationError> {
+        self.effect("poll")?;
+        let mut state = self.0.lock().unwrap();
+        let result = state.completions.remove(&token);
+        if result.as_ref().is_some_and(|r| r.quiescent) {
+            state.pending.remove(&token);
+        }
+        Ok(result)
+    }
+}
+fn addressed() -> (UsbSession<Fake>, Arc<Mutex<State>>, DeviceId) {
+    let (mut usb, state) = fixture();
+    let port = usb.inspect_ports().unwrap()[0].id;
+    let port = usb.reset_port(port, false).unwrap().id;
+    let device = usb.enable_slot(port).unwrap();
+    usb.address_device(device.id, false).unwrap();
+    (usb, state, device.id)
+}
+fn control(device: DeviceId, length: usize) -> RequestSpec {
+    RequestSpec {
+        device,
+        endpoint: 0,
+        transfer_type: TransferType::Control,
+        direction: Direction::In,
+        length,
+        setup: Some(SetupPacket {
+            request_type: 128,
+            request: 0,
+            value: 0,
+            index: 0,
+            length: length as u16,
+        }),
+        data: vec![],
+    }
+}
+fn complete(actual: usize, code: u32, bytes: Vec<u8>) -> BackendCompletion {
+    BackendCompletion {
+        actual_length: Some(actual),
+        completion_code: Some(code),
+        data: Some(bytes),
+        error: None,
+        quiescent: true,
+    }
+}
+#[test]
+fn timeout_and_logical_cancel_keep_owned_buffers_until_real_completion() {
+    let (mut usb, state, device) = addressed();
+    let mut spec = control(device, 4);
+    spec.direction = Direction::Out;
+    spec.setup.as_mut().unwrap().request_type = 64;
+    spec.setup.as_mut().unwrap().request = 85;
+    spec.data = vec![1, 2, 3, 4];
+    let id = usb.submit_request(spec).unwrap().id;
+    usb.logical_cancel_request(id).unwrap();
+    assert!(
+        usb.wait_request(id, std::time::Duration::ZERO)
+            .unwrap()
+            .timed_out
+    );
+    assert_eq!(state.lock().unwrap().pending[&1].buffer, vec![1, 2, 3, 4]);
+    assert!(usb.reclaim_request(id).is_err());
+    state
+        .lock()
+        .unwrap()
+        .completions
+        .insert(1, complete(4, 1, vec![1, 2, 3, 4]));
+    let report = usb.poll_request(id).unwrap();
+    assert!(matches!(report.state, RequestState::Completed { .. }));
+    assert!(report.logical_cancel && report.timed_out);
+    assert_eq!(report.data, Some(vec![1, 2, 3, 4]));
+    let polls = state
+        .lock()
+        .unwrap()
+        .trace
+        .iter()
+        .filter(|op| op.as_str() == "poll")
+        .count();
+    usb.poll_request(id).unwrap();
+    assert_eq!(
+        polls,
+        state
+            .lock()
+            .unwrap()
+            .trace
+            .iter()
+            .filter(|op| op.as_str() == "poll")
+            .count()
+    );
+    assert!(state.lock().unwrap().pending.is_empty());
+    usb.reclaim_request(id).unwrap();
+    assert!(usb.reclaim_request(id).is_err());
+}
+#[test]
+fn out_of_order_short_and_duplicate_completions_never_change_another_request() {
+    let (mut usb, state, device) = addressed();
+    let first = usb.submit_request(control(device, 2)).unwrap().id;
+    let second = usb.submit_request(control(device, 2)).unwrap().id;
+    state
+        .lock()
+        .unwrap()
+        .completions
+        .insert(2, complete(1, 13, vec![34]));
+    assert_eq!(usb.poll_request(second).unwrap().data, Some(vec![34]));
+    assert!(matches!(
+        usb.poll_request(first).unwrap().state,
+        RequestState::Pending { .. }
+    ));
+    state
+        .lock()
+        .unwrap()
+        .completions
+        .insert(2, complete(2, 1, vec![99, 99]));
+    assert_eq!(usb.poll_request(second).unwrap().data, Some(vec![34]));
+    state
+        .lock()
+        .unwrap()
+        .completions
+        .insert(1, complete(2, 1, vec![11, 12]));
+    assert_eq!(usb.poll_request(first).unwrap().data, Some(vec![11, 12]));
+    usb.reclaim_request(first).unwrap();
+    usb.reclaim_request(second).unwrap();
+    assert!(usb.request_status(first).is_err());
+}
+#[test]
+fn unconfirmed_failure_retains_buffers_and_requires_quiescence() {
+    let (mut usb, state, device) = addressed();
+    let id = usb.submit_request(control(device, 2)).unwrap().id;
+    let error = OperationError {
+        category: ErrorCategory::RecoveryRequired,
+        message: "invalid residual".into(),
+        os_code: None,
+        completion_code: Some(1),
+    };
+    state.lock().unwrap().completions.insert(
+        1,
+        BackendCompletion {
+            actual_length: None,
+            completion_code: Some(1),
+            data: None,
+            error: Some(error),
+            quiescent: false,
+        },
+    );
+    assert!(matches!(
+        usb.poll_request(id).unwrap().state,
+        RequestState::Failed {
+            quiescent: false,
+            ..
+        }
+    ));
+    assert_eq!(usb.session.state(), ControllerState::RecoveryRequired);
+    assert!(usb.reclaim_request(id).is_err());
+    assert!(usb.session.requests.advance_generation().is_err());
+    assert_eq!(state.lock().unwrap().pending.len(), 1);
+    usb.close().unwrap();
+    assert!(state.lock().unwrap().pending.is_empty());
+    assert!(usb.request_status(id).is_err());
+}
+#[test]
+fn malformed_inputs_and_low_speed_bulk_fail_before_publication() {
+    let (mut usb, state, device) = addressed();
+    let mut spec = control(device, 2);
+    spec.setup.as_mut().unwrap().length = 3;
+    assert!(usb.submit_request(spec).is_err());
+    let mut spec = control(device, 2);
+    spec.direction = Direction::Out;
+    assert!(usb.submit_request(spec).is_err());
+    usb.set_configuration(device, 2).unwrap();
+    state.lock().unwrap().status = 3 | (1 << 9) | (2 << 10);
+    let spec = RequestSpec {
+        device,
+        endpoint: 129,
+        transfer_type: TransferType::Bulk,
+        direction: Direction::In,
+        length: 8,
+        setup: None,
+        data: vec![],
+    };
+    assert_eq!(
+        usb.submit_request(spec).unwrap_err().category,
+        ErrorCategory::Unsupported
+    );
+    assert!(!state.lock().unwrap().trace.iter().any(|op| op == "submit"));
+}
+
+#[test]
+fn bounded_pending_capacity_rejects_without_publishing_or_losing_buffers() {
+    let (mut usb, state, device) = addressed();
+    for _ in 0..128 {
+        usb.submit_request(control(device, 2)).unwrap();
+    }
+    assert!(usb.submit_request(control(device, 2)).is_err());
+    assert_eq!(state.lock().unwrap().pending.len(), 128);
+    usb.close().unwrap();
+    assert!(state.lock().unwrap().pending.is_empty());
 }

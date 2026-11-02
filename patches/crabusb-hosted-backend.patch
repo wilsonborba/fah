@@ -96,10 +96,10 @@ index 71b939e..4ab690c 100644
 -    }
 -}
 diff --git a/usb-host/src/backend/kmod/mod.rs b/usb-host/src/backend/kmod/mod.rs
-index e17466d..26e4d2d 100644
+index e17466d..83b04e0 100644
 --- a/usb-host/src/backend/kmod/mod.rs
 +++ b/usb-host/src/backend/kmod/mod.rs
-@@ -50,3 +50,99 @@ pub struct DeviceAddressInfo {
+@@ -50,3 +50,113 @@ pub struct DeviceAddressInfo {
      pub port_id: u8,
      pub infos: BTreeMap<Id<Hub>, HubInfo>,
  }
@@ -192,6 +192,15 @@ index e17466d..26e4d2d 100644
 +    pub async fn setup_endpoints(&mut self,slot:u8,interface:u8,alternate:u8,bytes:&[u8])->Result<alloc::vec::Vec<usb_if::endpoint::EndpointInfo>> {
 +        self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.explicit_endpoints(interface,alternate,bytes).await
 +    }
++    pub fn submit_request(&mut self,slot:u8,endpoint:u8,request:usb_if::endpoint::TransferRequest)->Result<usb_if::endpoint::RequestId> {
++        self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.explicit_submit(endpoint,request)
++    }
++    pub fn request_dma_address(&mut self,slot:u8,endpoint:u8,id:usb_if::endpoint::RequestId)->Result<Option<u64>> {
++        self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.explicit_request_dma(endpoint,id)
++    }
++    pub fn reclaim_request(&mut self,slot:u8,endpoint:u8,id:usb_if::endpoint::RequestId)->Result<Option<ExplicitCompletion>> {
++        self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.explicit_reclaim(endpoint,id)
++    }
 +    pub fn event_handler(&mut self)->crate::EventHandler {
 +        crate::EventHandler::from_inner(self.core.create_event_handler())
 +    }
@@ -199,6 +208,11 @@ index e17466d..26e4d2d 100644
 +
 +#[cfg(feature="hosted-direct")]
 +fn port_writable_state(raw:u32)->u32 {raw&((1<<9)|(3<<14)|(7<<25))}
++
++pub struct ExplicitCompletion {
++    pub result:core::result::Result<usb_if::endpoint::TransferCompletion,usb_if::err::TransferError>,
++    pub completion_code:Option<u32>,
++}
 diff --git a/usb-host/src/backend/kmod/transfer.rs b/usb-host/src/backend/kmod/transfer.rs
 index 7efe34d..9354d97 100644
 --- a/usb-host/src/backend/kmod/transfer.rs
@@ -215,10 +229,10 @@ index 7efe34d..9354d97 100644
              )
          } else {
 diff --git a/usb-host/src/backend/kmod/xhci/device.rs b/usb-host/src/backend/kmod/xhci/device.rs
-index a7996fc..8c92691 100644
+index a7996fc..b3f92e1 100644
 --- a/usb-host/src/backend/kmod/xhci/device.rs
 +++ b/usb-host/src/backend/kmod/xhci/device.rs
-@@ -159,30 +159,61 @@ impl Device {
+@@ -159,30 +159,78 @@ impl Device {
          Ok(())
      }
  
@@ -283,6 +297,23 @@ index a7996fc..8c92691 100644
      async fn address(&mut self, host: &mut Xhci, info: &DeviceAddressInfo) -> Result {
 +        self.address_with_options(host,info,false).await
 +    }
++    fn explicit_endpoint_mut(&mut self,address:u8)->Result<&mut Endpoint> {
++        if address&0x70!=0 {return Err(usb_if::err::USBError::InvalidParameter);}
++        if address&15==0 {self.ctrl_ep.as_mut().ok_or(usb_if::err::USBError::NotInitialized)}
++        else {self.eps.get_mut(&address).ok_or(usb_if::err::USBError::NotFound)}
++    }
++    pub(crate) fn explicit_submit(&mut self,address:u8,request:usb_if::endpoint::TransferRequest)->Result<usb_if::endpoint::RequestId> {
++        Ok(self.explicit_endpoint_mut(address)?.submit(request)?)
++    }
++    pub(crate) fn explicit_request_dma(&mut self,address:u8,id:usb_if::endpoint::RequestId)->Result<Option<u64>> {
++        Ok(self.explicit_endpoint_mut(address)?.with_raw_mut::<XhciEndpoint,_>(|ep|ep.pending_dma_address(id)))
++    }
++    pub(crate) fn explicit_reclaim(&mut self,address:u8,id:usb_if::endpoint::RequestId)->Result<Option<crate::ExplicitCompletion>> {
++        let endpoint=self.explicit_endpoint_mut(address)?;
++        let result=match endpoint.reclaim(id) {Ok(None)=>return Ok(None),Ok(Some(completion))=>Ok(completion),Err(error)=>Err(error)};
++        let completion_code=endpoint.with_raw_mut::<XhciEndpoint,_>(|ep|ep.completion_code(id));
++        Ok(Some(crate::ExplicitCompletion{result,completion_code}))
++    }
 +    pub(crate) fn slot_number(&self)->u8 {self.id.as_u8()}
 +    pub(crate) async fn prepare_explicit(&mut self,host:&mut Xhci,info:&DeviceAddressInfo,bsr:bool)->Result {
 +        self.port_speed=info.port_speed;
@@ -296,7 +327,7 @@ index a7996fc..8c92691 100644
          // 直接使用 DeviceSpeed 枚举计算默认 max packet size
          let max_packet_size = parse_default_max_packet_size_from_port_speed(info.port_speed);
  
-@@ -329,11 +360,7 @@ impl Device {
+@@ -329,11 +377,7 @@ impl Device {
          let input_bus_addr = self.ctx.input_bus_addr();
          trace!("Input context bus address: {input_bus_addr:#x?}");
          let result = host
@@ -309,7 +340,7 @@ index a7996fc..8c92691 100644
              .await?;
  
          debug!("Address slot ok {result:x?}");
-@@ -348,12 +375,10 @@ impl Device {
+@@ -348,12 +392,10 @@ impl Device {
      async fn get_device_descriptor_base(&mut self) -> Result<DeviceDescriptorBase> {
          let mut data = vec![0u8; 8];
  
@@ -326,7 +357,7 @@ index a7996fc..8c92691 100644
  
          Ok(desc)
      }
-@@ -528,7 +553,7 @@ impl Device {
+@@ -528,7 +570,7 @@ impl Device {
              input
                  .device_mut()
                  .slot_mut()
@@ -335,7 +366,7 @@ index a7996fc..8c92691 100644
          });
          mb();
  
-@@ -765,3 +790,59 @@ impl DeviceOp for Device {
+@@ -765,3 +807,59 @@ impl DeviceOp for Device {
          self.update_hub_inner(params).boxed()
      }
  }
@@ -396,10 +427,109 @@ index a7996fc..8c92691 100644
 +    }
 +}
 diff --git a/usb-host/src/backend/kmod/xhci/endpoint.rs b/usb-host/src/backend/kmod/xhci/endpoint.rs
-index 5c11453..31918f2 100644
+index 5c11453..54a55c7 100644
 --- a/usb-host/src/backend/kmod/xhci/endpoint.rs
 +++ b/usb-host/src/backend/kmod/xhci/endpoint.rs
-@@ -608,10 +608,10 @@ impl EndpointOp for Endpoint {
+@@ -95,6 +95,7 @@ pub struct Endpoint {
+     pub ring: SendRing<TransferEvent>,
+     bell: Arc<Mutex<SlotBell>>,
+     next_request_id: u64,
++    last_completion:Option<(u64,u32)>,
+     inflight: BTreeMap<EndpointRequestId, SubmittedTd>,
+     trb_to_request: BTreeMap<TransferId, EndpointRequestId>,
+     outstanding_trbs: usize,
+@@ -121,6 +122,7 @@ impl Endpoint {
+             ring,
+             bell,
+             next_request_id: 1,
++            last_completion:None,
+             inflight: BTreeMap::new(),
+             trb_to_request: BTreeMap::new(),
+             outstanding_trbs: 0,
+@@ -133,6 +135,13 @@ impl Endpoint {
+         })
+     }
+ 
++    pub(crate) fn pending_dma_address(&self,id:RequestId)->Option<u64> {
++        let transfer=&self.inflight.get(&Self::private_request_id(id))?.transfer;
++        transfer.mapping.as_ref().map(|mapping|mapping.dma_addr().as_u64())
++    }
++    pub(crate) fn completion_code(&self,id:RequestId)->Option<u32> {
++        self.last_completion.filter(|(request,_)|*request==id.raw()).map(|(_,code)|code)
++    }
+     pub fn configure_periodic(
+         &mut self,
+         max_packet_size: usize,
+@@ -215,12 +224,7 @@ impl Endpoint {
+         Ok(())
+     }
+ 
+-    fn complete_request(
+-        &mut self,
+-        request_id: EndpointRequestId,
+-        event_trb: TransferId,
+-        event: TransferEvent,
+-    ) -> Result<Transfer, TransferError> {
++    fn retire_request_metadata(&mut self,request_id:EndpointRequestId,event_trb:TransferId,event:TransferEvent)->Result<SubmittedTd,TransferError> {
+         let submitted = self.inflight.remove(&request_id).ok_or_else(|| {
+             warn!(
+                 "xhci: completion for missing request dci={} request_id={} event_trb={:#x}",
+@@ -230,6 +234,7 @@ impl Endpoint {
+             );
+             TransferError::InvalidEndpoint
+         })?;
++        self.last_completion=Some((request_id.0,(event.into_raw()[2]>>24)&255));
+         self.outstanding_trbs = self.outstanding_trbs.saturating_sub(submitted.trb_count);
+         match &submitted.kind {
+             SubmittedTdKind::Normal { completion_trb } => {
+@@ -247,6 +252,16 @@ impl Endpoint {
+             }
+         }
+ 
++        Ok(submitted)
++    }
++
++    fn complete_request(
++        &mut self,
++        request_id: EndpointRequestId,
++        event_trb: TransferId,
++        event: TransferEvent,
++    ) -> Result<Transfer, TransferError> {
++        let submitted=self.retire_request_metadata(request_id,event_trb,event)?;
+         if submitted.cancelled {
+             return Err(TransferError::Cancelled);
+         }
+@@ -303,7 +318,7 @@ impl Endpoint {
+             }
+             SubmittedTdKind::Normal { .. } => {
+                 let remaining = event.trb_transfer_length() as usize;
+-                transfer.buffer_len().saturating_sub(remaining)
++                checked_actual_length(transfer.buffer_len(),remaining)?
+             }
+             SubmittedTdKind::Iso { .. } => unreachable!("ISO was handled above"),
+         };
+@@ -327,6 +342,11 @@ impl Endpoint {
+                 continue;
+             };
+             let remaining = event.trb_transfer_length() as usize;
++            if matches!(stage,ControlStage::Data) && remaining>control_td.requested {
++                // Retire metadata without reading/copying unconfirmed DMA data.
++                let _=self.retire_request_metadata(request_id,event_trb,event);
++                return Some(Err(TransferError::Other(anyhow!("control residual exceeds request"))));
++            }
+             if let Some(submitted) = self.inflight.get_mut(&request_id)
+                 && let SubmittedTdKind::Control(control_td) = &mut submitted.kind
+             {
+@@ -334,7 +354,7 @@ impl Endpoint {
+                     ControlStage::Setup => {}
+                     ControlStage::Data => {
+                         control_td.actual =
+-                            Some(submitted.transfer.buffer_len().saturating_sub(remaining));
++                            Some(checked_actual_length(submitted.transfer.buffer_len(),remaining).expect("immutable control length was checked"));
+                     }
+                     ControlStage::Status if control_td.actual.is_none() => {
+                         control_td.actual = Some(control_td.requested);
+@@ -608,10 +628,10 @@ impl EndpointOp for Endpoint {
                  transfer.confirm_write_all();
              }
              data_bus_addr = transfer.dma_addr();
@@ -413,7 +543,7 @@ index 5c11453..31918f2 100644
                      data_bus_addr,
                      buffer_end,
                      self.kernel.dma_mask()
-@@ -882,3 +882,20 @@ impl EndpointDescriptorExt for EndpointDescriptor {
+@@ -882,3 +902,36 @@ impl EndpointDescriptorExt for EndpointDescriptor {
          }
      }
  }
@@ -432,6 +562,22 @@ index 5c11453..31918f2 100644
 +        assert!(dma_buffer_fits(u64::MAX,1,u64::MAX));
 +        assert!(!dma_buffer_fits(u64::MAX,2,u64::MAX));
 +        assert!(!dma_buffer_fits(0,0,u64::MAX));
++    }
++}
++
++fn checked_actual_length(requested:usize,residual:usize)->Result<usize,TransferError> {
++    requested.checked_sub(residual).ok_or_else(||TransferError::Other(anyhow!("transfer residual exceeds request")))
++}
++#[cfg(test)]
++mod residual_tests {
++    use super::checked_actual_length;
++    #[test]
++    fn invalid_residue_is_not_zero_length_success() {
++        assert_eq!(checked_actual_length(10,0).unwrap(),10);
++        assert_eq!(checked_actual_length(10,10).unwrap(),0);
++        assert_eq!(checked_actual_length(0,0).unwrap(),0);
++        assert!(checked_actual_length(10,11).is_err());
++        assert!(checked_actual_length(0,1).is_err());
 +    }
 +}
 diff --git a/usb-host/src/backend/kmod/xhci/event.rs b/usb-host/src/backend/kmod/xhci/event.rs

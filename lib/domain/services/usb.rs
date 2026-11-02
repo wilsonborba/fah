@@ -37,7 +37,8 @@ pub struct UsbSession<B: DeviceBackend> {
     next_generation: u64,
     configurations: BTreeMap<u8, BTreeMap<u8, Vec<u8>>>,
     interfaces: BTreeMap<(u8, u8), u8>,
-    endpoints: BTreeMap<u8, Vec<EndpointSnapshot>>,
+    pub(crate) endpoints: BTreeMap<u8, Vec<EndpointSnapshot>>,
+    pub(crate) records: BTreeMap<crate::domain::models::RequestId, super::requests::RequestRecord>,
 }
 impl<B: DeviceBackend> UsbSession<B> {
     pub fn new(backend: B, identity: u64) -> Self {
@@ -50,6 +51,7 @@ impl<B: DeviceBackend> UsbSession<B> {
             configurations: BTreeMap::new(),
             interfaces: BTreeMap::new(),
             endpoints: BTreeMap::new(),
+            records: BTreeMap::new(),
         }
     }
     pub fn initialize(&mut self) -> Result<(), OperationError> {
@@ -65,7 +67,7 @@ impl<B: DeviceBackend> UsbSession<B> {
             .ok_or_else(|| OperationError::validation("ports not initialized"))?
             .inspect(|number| backend.port_status(number))
     }
-    fn fresh_port(&mut self, id: PortId) -> Result<PortSnapshot, OperationError> {
+    pub(crate) fn fresh_port(&mut self, id: PortId) -> Result<PortSnapshot, OperationError> {
         self.ports
             .as_ref()
             .ok_or_else(|| OperationError::validation("ports not initialized"))?
@@ -217,9 +219,13 @@ impl<B: DeviceBackend> UsbSession<B> {
         self.configurations.clear();
         self.interfaces.clear();
         self.endpoints.clear();
+        self.records.clear();
         Ok(())
     }
-    fn effect<T>(&mut self, result: Result<T, OperationError>) -> Result<T, OperationError> {
+    pub(crate) fn effect<T>(
+        &mut self,
+        result: Result<T, OperationError>,
+    ) -> Result<T, OperationError> {
         if result.as_ref().is_err_and(|error| {
             !matches!(
                 error.category,
@@ -266,7 +272,10 @@ pub trait ConfigurationBackend: DeviceBackend {
     ) -> Result<Vec<EndpointSnapshot>, OperationError>;
 }
 impl<B: ConfigurationBackend> UsbSession<B> {
-    fn prepared_device(&mut self, id: DeviceId) -> Result<DeviceSnapshot, OperationError> {
+    pub(crate) fn prepared_device(
+        &mut self,
+        id: DeviceId,
+    ) -> Result<DeviceSnapshot, OperationError> {
         let device = self.device(id)?.clone();
         self.fresh_port(device.port)?;
         if !matches!(
