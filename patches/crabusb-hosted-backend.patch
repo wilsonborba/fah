@@ -96,10 +96,10 @@ index 71b939e..4ab690c 100644
 -    }
 -}
 diff --git a/usb-host/src/backend/kmod/mod.rs b/usb-host/src/backend/kmod/mod.rs
-index e17466d..bf30364 100644
+index e17466d..efe5a86 100644
 --- a/usb-host/src/backend/kmod/mod.rs
 +++ b/usb-host/src/backend/kmod/mod.rs
-@@ -50,3 +50,34 @@ pub struct DeviceAddressInfo {
+@@ -50,3 +50,80 @@ pub struct DeviceAddressInfo {
      pub port_id: u8,
      pub infos: BTreeMap<Id<Hub>, HubInfo>,
  }
@@ -107,7 +107,7 @@ index e17466d..bf30364 100644
 +/// Direct hosted entry point sharing the existing xHCI engine. Unlike the
 +/// convenience Core, initialization does not discover/reset root-hub ports.
 +#[cfg(feature = "hosted-direct")]
-+pub struct ExplicitHost {pub(crate) core:Xhci}
++pub struct ExplicitHost {pub(crate) core:Xhci, devices:BTreeMap<u8,xhci::Device>}
 +#[cfg(feature = "hosted-direct")]
 +impl ExplicitHost {
 +    /// # Safety
@@ -115,14 +115,14 @@ index e17466d..bf30364 100644
 +    /// outlive this owner and its sole event handler. Kernel/DMA resources must
 +    /// remain alive through confirmed stop and successful unmap.
 +    pub unsafe fn new(mmio:Mmio,kernel:&'static dyn KernelOp)->Result<Self> {
-+        Ok(Self {core:Xhci::new(mmio,kernel)?})
++        Ok(Self {core:Xhci::new(mmio,kernel)?,devices:BTreeMap::new()})
 +    }
 +    pub async fn initialize(&mut self)->Result<()> {self.core.init().await}
 +    pub fn port_count(&self)->u8 {self.core.reg.read().port_register_set.len() as u8}
 +    /// Read only: no PORTSC W1C acknowledgment and no discovery helper.
 +    pub fn port_status(&self,number:u8)->Result<u32> {
 +        let reg=self.core.reg.read();
-+        if number==0 || number as usize>reg.port_register_set.len() {return Err(USBError::Other(anyhow!("invalid root port")));}
++        if number==0 || number as usize>reg.port_register_set.len() {return Err(USBError::InvalidParameter);}
 +        // PORTSC is one aligned 32-bit register per 16-byte port register set.
 +        // The hosted owner validated the whole port-register span before new().
 +        let operational=reg.capability.caplength.read_volatile().get() as usize;
@@ -130,10 +130,56 @@ index e17466d..bf30364 100644
 +        Ok(unsafe {ptr.read_volatile()})
 +    }
 +
++    /// Enable Slot and allocate its contexts; no USB requests are sent.
++    pub async fn enable_slot(&mut self)->Result<u8> {
++        let device=xhci::Device::new(&mut self.core).await?;
++        let slot=device.slot_number();self.devices.insert(slot,device);Ok(slot)
++    }
++    pub async fn address_device(&mut self,slot:u8,port:u8,bsr:bool)->Result<()> {
++        let status=self.port_status(port)?;
++        if status&3!=3 {return Err(USBError::InvalidParameter);}
++        let speed_code=((status>>10)&15)as u8;
++        if !(1..=5).contains(&speed_code) {return Err(USBError::NotSupported);}
++        let speed=usb_if::Speed::from_xhci_portsc(speed_code);
++        let info=DeviceAddressInfo {root_port_id:port,parent_hub:None,port_speed:speed,port_id:port,infos:BTreeMap::new()};
++        let mut device=self.devices.remove(&slot).ok_or(USBError::NotFound)?;
++        let result=device.prepare_explicit(&mut self.core,&info,bsr).await;
++        self.devices.insert(slot,device);result
++    }
++    pub fn acknowledge_port(&mut self,port:u8,changes:u32)->Result<()> {
++        if changes & !0x00fe0000 != 0 {return Err(USBError::InvalidParameter);}
++        let raw=self.port_status(port)?;
++        self.write_port(port,port_writable_state(raw)|changes);Ok(())
++    }
++    pub async fn reset_port(&mut self,port:u8,warm:bool)->Result<()> {
++        let raw=self.port_status(port)?;
++        if raw&1==0 || raw&(1<<9)==0 {return Err(USBError::InvalidParameter);}
++        if warm && ((raw>>10)&15)<4 {return Err(USBError::NotSupported);}
++        self.write_port(port,port_writable_state(raw)|if warm {1<<31}else{1<<4});
++        loop {
++            let raw=self.port_status(port)?;
++            if raw&1==0 {return Err(USBError::NotFound);}
++            if raw&((1<<4)|(1<<31))==0 && raw&2!=0 {return Ok(());}
++            self.core.kernel.delay(core::time::Duration::from_millis(1));
++            // Yield to the outer deadline driver instead of an unbounded loop
++            // inside a single future poll.
++            struct Yield(bool);
++            impl core::future::Future for Yield {type Output=();fn poll(mut self:core::pin::Pin<&mut Self>,cx:&mut core::task::Context<'_>)->core::task::Poll<()> {if self.0 {core::task::Poll::Ready(())}else{self.0=true;cx.waker().wake_by_ref();core::task::Poll::Pending}}}
++            Yield(false).await;
++        }
++    }
++    fn write_port(&mut self,port:u8,value:u32) {
++        let reg=self.core.reg.read();
++        let op=reg.capability.caplength.read_volatile().get() as usize;
++        unsafe {((reg.mmio_base+op+0x400+(port as usize-1)*16)as *mut u32).write_volatile(value);}
++    }
 +    pub fn event_handler(&mut self)->crate::EventHandler {
 +        crate::EventHandler::from_inner(self.core.create_event_handler())
 +    }
 +}
++
++#[cfg(feature="hosted-direct")]
++fn port_writable_state(raw:u32)->u32 {raw&((1<<9)|(3<<14)|(7<<25))}
 diff --git a/usb-host/src/backend/kmod/transfer.rs b/usb-host/src/backend/kmod/transfer.rs
 index 7efe34d..9354d97 100644
 --- a/usb-host/src/backend/kmod/transfer.rs
@@ -149,6 +195,64 @@ index 7efe34d..9354d97 100644
                      .map_err(|err| TransferError::Other(anyhow!("DMA mapping failed: {err}")))?,
              )
          } else {
+diff --git a/usb-host/src/backend/kmod/xhci/device.rs b/usb-host/src/backend/kmod/xhci/device.rs
+index a7996fc..7aa5e2a 100644
+--- a/usb-host/src/backend/kmod/xhci/device.rs
++++ b/usb-host/src/backend/kmod/xhci/device.rs
+@@ -183,6 +183,18 @@ impl Device {
+     }
+ 
+     async fn address(&mut self, host: &mut Xhci, info: &DeviceAddressInfo) -> Result {
++        self.address_with_options(host,info,false).await
++    }
++    pub(crate) fn slot_number(&self)->u8 {self.id.as_u8()}
++    pub(crate) async fn prepare_explicit(&mut self,host:&mut Xhci,info:&DeviceAddressInfo,bsr:bool)->Result {
++        self.port_speed=info.port_speed;
++        if self.ctrl_ep.is_none() {
++            let ep=self.new_ep(Dci::CTRL)?;
++            self.ctrl_ep=Some(Endpoint::new(EndpointInfo::control(),ep));
++        }
++        self.address_with_options(host,info,bsr).await
++    }
++    async fn address_with_options(&mut self, host: &mut Xhci, info: &DeviceAddressInfo, bsr:bool) -> Result {
+         // 直接使用 DeviceSpeed 枚举计算默认 max packet size
+         let max_packet_size = parse_default_max_packet_size_from_port_speed(info.port_speed);
+ 
+@@ -329,11 +341,7 @@ impl Device {
+         let input_bus_addr = self.ctx.input_bus_addr();
+         trace!("Input context bus address: {input_bus_addr:#x?}");
+         let result = host
+-            .cmd_request(command::Allowed::AddressDevice(
+-                *command::AddressDevice::new()
+-                    .set_slot_id(self.id.into())
+-                    .set_input_context_pointer(input_bus_addr),
+-            ))
++            .cmd_request(explicit_address_command(self.id.as_u8(),input_bus_addr,bsr))
+             .await?;
+ 
+         debug!("Address slot ok {result:x?}");
+@@ -765,3 +773,21 @@ impl DeviceOp for Device {
+         self.update_hub_inner(params).boxed()
+     }
+ }
++
++pub(crate) fn explicit_address_command(slot:u8,input:u64,bsr:bool)->command::Allowed {
++    let mut command=command::AddressDevice::new();
++    command.set_slot_id(slot).set_input_context_pointer(input);
++    if bsr {command.set_block_set_address_request();}
++    command.into()
++}
++#[cfg(test)]
++mod explicit_address_tests {
++    use super::*;
++    #[test]
++    fn bsr_and_address_command_have_distinct_encodings() {
++        let regular=explicit_address_command(7,0x1000,false).into_raw();
++        let blocked=explicit_address_command(7,0x1000,true).into_raw();
++        assert_eq!(regular[0],0x1000);assert_eq!(regular[3]>>24,7);
++        assert_eq!(blocked[3]^regular[3],1<<9);
++    }
++}
 diff --git a/usb-host/src/backend/kmod/xhci/endpoint.rs b/usb-host/src/backend/kmod/xhci/endpoint.rs
 index 5c11453..31918f2 100644
 --- a/usb-host/src/backend/kmod/xhci/endpoint.rs

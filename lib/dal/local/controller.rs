@@ -55,7 +55,7 @@ impl LocalController {
             .as_ref()
             .ok_or_else(|| OperationError::validation("controller is not initialized"))?
             .port_status(number)
-            .map_err(|e| os_error(format!("{e:?}")))
+            .map_err(usb_error)
     }
     fn initialize_inner(&mut self) -> Result<(), String> {
         if self.host.is_some() || self.adapter.is_some() {
@@ -298,5 +298,70 @@ impl Drop for LocalController {
                 std::mem::forget(value);
             }
         }
+    }
+}
+
+impl crate::domain::services::usb::DeviceBackend for LocalController {
+    fn port_count(&self) -> Result<u8, OperationError> {
+        LocalController::port_count(self)
+    }
+    fn port_status(&self, port: u8) -> Result<u32, OperationError> {
+        LocalController::port_status(self, port)
+    }
+    fn acknowledge_port(&mut self, port: u8, changes: u32) -> Result<(), OperationError> {
+        self.host
+            .as_mut()
+            .ok_or_else(|| OperationError::validation("controller not initialized"))?
+            .acknowledge_port(port, changes)
+            .map_err(usb_error)
+    }
+    fn reset_port(&mut self, port: u8, warm: bool) -> Result<(), OperationError> {
+        let host = self
+            .host
+            .as_mut()
+            .ok_or_else(|| OperationError::validation("controller not initialized"))?;
+        device_future(host.reset_port(port, warm))
+    }
+    fn enable_slot(&mut self) -> Result<u8, OperationError> {
+        let host = self
+            .host
+            .as_mut()
+            .ok_or_else(|| OperationError::validation("controller not initialized"))?;
+        device_future(host.enable_slot())
+    }
+    fn address_device(&mut self, slot: u8, port: u8, bsr: bool) -> Result<(), OperationError> {
+        let host = self
+            .host
+            .as_mut()
+            .ok_or_else(|| OperationError::validation("controller not initialized"))?;
+        device_future(host.address_device(slot, port, bsr))
+    }
+}
+fn device_future<T>(
+    future: impl Future<Output = crab_usb::err::Result<T>>,
+) -> Result<T, OperationError> {
+    block_until(future, Duration::from_secs(5))
+        .map_err(|message| OperationError {
+            category: ErrorCategory::Timeout,
+            message,
+            os_code: None,
+            completion_code: None,
+        })?
+        .map_err(usb_error)
+}
+fn usb_error(error: crab_usb::usb_if::err::USBError) -> OperationError {
+    use crab_usb::usb_if::err::USBError;
+    let category = match error {
+        USBError::InvalidParameter | USBError::NotInitialized => ErrorCategory::Validation,
+        USBError::NotSupported => ErrorCategory::Unsupported,
+        USBError::NotFound => ErrorCategory::Disconnect,
+        USBError::Timeout => ErrorCategory::Timeout,
+        _ => ErrorCategory::Controller,
+    };
+    OperationError {
+        category,
+        message: format!("{error:?}"),
+        os_code: None,
+        completion_code: None,
     }
 }
