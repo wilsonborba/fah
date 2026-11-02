@@ -25,14 +25,16 @@
 //! # Baseline findings and execution gate
 //!
 //! CrabUSB e83b56b event.rs current_data uses dma-api DArray::read. dma-api 0.7.3
-//! uses ordinary pointer reads. Context DBox reads also use ordinary loads.
-//! transfer.rs forms a mutable slice before map_single_array. These paths need
-//! correction against VFIO's mapping contract before executable bring-up.
+//! used ordinary pointer reads. Context DBox reads also used ordinary loads.
+//! The maintained patches now use volatile accesses, cycle-first event reads,
+//! control-dword-last TRB publication and raw streaming-map construction.
+//! Reference-forming dma-api helpers fail closed under fah-vfio. Streaming
+//! buffers use CPU-owned originals and separately mapped bounce storage.
 //!
 //! An adapter wrapper cannot fix dependency-private reads it never intercepts.
 //! The maintained dependency patch must cover those paths (issue #10). This
-//! contract does not declare them sound. Hardware construction and VM driver
-//! execution remain blocked until that implementation and review are complete.
+//! contract does not declare the whole backend sound. Executable bring-up also
+//! requires the single-owner lifecycle and quiescence/teardown gates (#11/#17).
 //!
 //! # Failure and reclamation
 //!
@@ -47,3 +49,18 @@
 //! Neither codegen, Miri, successful compilation nor runtime tests alone prove
 //! correctness of hardware DMA. Coherent x86 caches remove cache maintenance,
 //! not ordering, aliasing, or lifetime obligations.
+
+pub mod iova;
+
+#[cfg(feature = "hosted-direct")]
+pub mod dma;
+
+pub mod resources;
+
+#[cfg(feature = "hosted-direct")]
+pub mod events;
+
+pub mod iommu;
+
+#[cfg(feature = "hosted-direct")]
+pub mod controller;

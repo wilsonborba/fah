@@ -27,3 +27,401 @@ index f8cc9f1..7cd405e 100644
          println!("cargo::rustc-cfg=kmod");
      } else if std::env::var("CARGO_FEATURE_LIBUSB").is_ok() {
          println!("cargo::rustc-cfg=umod");
+diff --git a/usb-host/src/backend/kmod/dwc/grf.rs b/usb-host/src/backend/kmod/dwc/grf.rs
+index 4c6eccf..85dcbcc 100644
+--- a/usb-host/src/backend/kmod/dwc/grf.rs
++++ b/usb-host/src/backend/kmod/dwc/grf.rs
+@@ -506,22 +506,22 @@ mod tests {
+         // 测试 USB3OTG_CFG 位字段
+         let value =
+             USB3OTG_CFG::PIPE_ENABLE::Enable.value + USB3OTG_CFG::U3_PORT_DISABLE::Disable.value;
+-        assert_eq!(value, (1 << 15) | (0 << 8));
++        assert_eq!(value, (1 << 15) | (1 << 8));
+     }
+ 
+     #[test]
+     fn test_enable_u3_port_value() {
+-        // 0x0188 = bit 15 = 1, bit 8 = 0
+-        let expected: u32 = 0x0188;
++        // Enabling U3 clears its disable bit; PIPE_ENABLE is bit 15.
++        let expected: u32 = 0x8000;
+         let value =
+-            USB3OTG_CFG::PIPE_ENABLE::Enable.value + USB3OTG_CFG::U3_PORT_DISABLE::Disable.value;
++            USB3OTG_CFG::PIPE_ENABLE::Enable.value + USB3OTG_CFG::U3_PORT_DISABLE::Enable.value;
+         assert_eq!(value, expected);
+     }
+ 
+     #[test]
+     fn test_disable_u3_port_value() {
+-        // 0x1100 = bit 15 = 1, bit 12 = 1
+-        let expected: u32 = 0x1100;
++        // 0x9000 = bit 15 = 1, bit 12 = 1
++        let expected: u32 = 0x9000;
+         let value =
+             USB3OTG_CFG::PIPE_ENABLE::Enable.value + USB3OTG_CFG::PHY_DISABLE::Disable.value;
+         assert_eq!(value, expected);
+diff --git a/usb-host/src/backend/kmod/hub/mod.rs b/usb-host/src/backend/kmod/hub/mod.rs
+index 71b939e..4ab690c 100644
+--- a/usb-host/src/backend/kmod/hub/mod.rs
++++ b/usb-host/src/backend/kmod/hub/mod.rs
+@@ -92,19 +92,3 @@ pub struct UsbTt {
+     pub think_time_ns: usize,
+ }
+ 
+-#[cfg(test)]
+-mod tests {
+-
+-    use super::RouteString;
+-
+-    #[test]
+-    fn test_route_string() {
+-        let mut rs = RouteString::follow_root();
+-        rs.push_hub(3);
+-        rs.push_hub(5);
+-        rs.push_hub(2);
+-        assert_eq!(rs.raw(), 0b0010_0101_0011);
+-        assert_eq!(format!("{:?}", rs), "3.5.2");
+-        println!("raw: {:#x}", rs.0);
+-    }
+-}
+diff --git a/usb-host/src/backend/kmod/mod.rs b/usb-host/src/backend/kmod/mod.rs
+index e17466d..fe8a849 100644
+--- a/usb-host/src/backend/kmod/mod.rs
++++ b/usb-host/src/backend/kmod/mod.rs
+@@ -50,3 +50,22 @@ pub struct DeviceAddressInfo {
+     pub port_id: u8,
+     pub infos: BTreeMap<Id<Hub>, HubInfo>,
+ }
++
++/// Direct hosted entry point sharing the existing xHCI engine. Unlike the
++/// convenience Core, initialization does not discover/reset root-hub ports.
++#[cfg(feature = "hosted-direct")]
++pub struct ExplicitHost {pub(crate) core:Xhci}
++#[cfg(feature = "hosted-direct")]
++impl ExplicitHost {
++    /// # Safety
++    /// MMIO must cover all validated register/extended-capability spans and
++    /// outlive this owner and its sole event handler. Kernel/DMA resources must
++    /// remain alive through confirmed stop and successful unmap.
++    pub unsafe fn new(mmio:Mmio,kernel:&'static dyn KernelOp)->Result<Self> {
++        Ok(Self {core:Xhci::new(mmio,kernel)?})
++    }
++    pub async fn initialize(&mut self)->Result<()> {self.core.init().await}
++    pub fn event_handler(&mut self)->crate::EventHandler {
++        crate::EventHandler::from_inner(self.core.create_event_handler())
++    }
++}
+diff --git a/usb-host/src/backend/kmod/transfer.rs b/usb-host/src/backend/kmod/transfer.rs
+index 7efe34d..9354d97 100644
+--- a/usb-host/src/backend/kmod/transfer.rs
++++ b/usb-host/src/backend/kmod/transfer.rs
+@@ -25,9 +25,8 @@ impl Transfer {
+             Direction::Out => DmaDirection::ToDevice,
+         };
+         let mapping = if let Some((ptr, len)) = buff.filter(|(_, len)| *len > 0) {
+-            let slice = unsafe { core::slice::from_raw_parts_mut(ptr.as_ptr(), len) };
+             Some(
+-                dma.map_single_array(slice, ALIGN, dma_direction)
++                unsafe { dma.map_single_raw(ptr, len, ALIGN, dma_direction) }
+                     .map_err(|err| TransferError::Other(anyhow!("DMA mapping failed: {err}")))?,
+             )
+         } else {
+diff --git a/usb-host/src/backend/kmod/xhci/event.rs b/usb-host/src/backend/kmod/xhci/event.rs
+index 27eeae2..12f8e2b 100644
+--- a/usb-host/src/backend/kmod/xhci/event.rs
++++ b/usb-host/src/backend/kmod/xhci/event.rs
+@@ -60,7 +60,7 @@ impl EventRing {
+     }
+ 
+     pub fn next(&mut self) -> Option<Allowed> {
+-        let data = self.current_data();
++        let data = self.current_data()?;
+ 
+         let allowed = Allowed::try_from(data.to_raw()).ok()?;
+ 
+@@ -73,11 +73,7 @@ impl EventRing {
+     }
+ 
+     pub fn has_pending_event(&mut self) -> bool {
+-        let data = self.current_data();
+-        let Ok(allowed) = Allowed::try_from(data.to_raw()) else {
+-            return false;
+-        };
+-        self.cycle == allowed.cycle_bit()
++        self.current_data().is_some()
+     }
+ 
+     pub fn erdp(&self) -> u64 {
+@@ -112,11 +108,22 @@ impl EventRing {
+         &self.segments[self.segment_index]
+     }
+ 
+-    fn current_data(&self) -> super::ring::TrbData {
+-        self.current_segment()
+-            .trbs
+-            .read(self.trb_index)
+-            .expect("event ring TRB index out of bounds")
++    // x86_64 coherent DMA: acquire ownership before loading event payload.
++    // No reference is formed to the mapped bytes; the controller publishes the
++    // cycle bit in dword 3 after the payload. The ring is single-consumer.
++    fn current_data(&self) -> Option<super::ring::TrbData> {
++        let ring = &self.current_segment().trbs;
++        let offset = self.trb_index * 16;
++        ring.prepare_read(offset + 12, 4);
++        let base = unsafe {ring.as_ptr().as_ptr().cast::<u32>().add(self.trb_index * 4)};
++        let control = unsafe {base.add(3).read_volatile()};
++        if (control & 1 != 0) != self.cycle { return None; }
++        mb();
++        ring.prepare_read(offset, 12);
++        let mut words = [0u32; 4];
++        for word in 0..3 { words[word] = unsafe {base.add(word).read_volatile()}; }
++        words[3] = control;
++        Some(super::ring::TrbData(words))
+     }
+ 
+     fn inc_deque(&mut self) {
+@@ -137,3 +144,60 @@ pub struct EventRingInfo {
+     pub erdp: u64,
+     pub erstba: u64,
+ }
++
++#[cfg(all(test, feature = "hosted-direct"))]
++mod access_tests {
++    use super::*;
++    use crate::osal::{DmaAddr,DmaHandle,DmaMapHandle,DmaError,DmaOp,KernelOp};
++    use core::{alloc::Layout, num::NonZeroUsize, ptr::NonNull, time::Duration};
++    struct Memory;
++    impl DmaOp for Memory {
++        fn page_size(&self)->usize {4096}
++        unsafe fn alloc_coherent(&self,_:u64,layout:Layout)->Option<DmaHandle> {
++            let ptr=NonNull::new(unsafe {std::alloc::alloc_zeroed(layout)})?;
++            Some(unsafe {DmaHandle::new(ptr,DmaAddr::from(ptr.as_ptr() as u64),layout)})
++        }
++        unsafe fn dealloc_coherent(&self,h:DmaHandle) {
++            unsafe {std::alloc::dealloc(h.as_ptr().as_ptr(),h.layout());}
++        }
++        unsafe fn map_single(&self,_:u64,_:NonNull<u8>,_:NonZeroUsize,_:usize,_:DmaDirection)->core::result::Result<DmaMapHandle,DmaError> {unreachable!()}
++        unsafe fn unmap_single(&self,_:DmaMapHandle) {unreachable!()}
++    }
++    impl KernelOp for Memory {fn delay(&self,_:Duration) {}}
++    static MEMORY:Memory=Memory;
++    #[test]
++    fn event_cycle_is_checked_before_consumption_and_wraps() {
++        let kernel=Kernel::new(u64::MAX,&MEMORY);
++        let mut ring=EventRing::new(2,&kernel).unwrap();
++        // Zeroed entries have an unpublished cycle; no dequeue advance.
++        assert!(ring.next().is_none());
++        assert_eq!((ring.segment_index,ring.trb_index,ring.cycle),(0,0,true));
++        for segment in &mut ring.segments {
++            for index in 0..TRBS_PER_SEGMENT {
++                // Command Completion TRB: type 33, Success completion, cycle one.
++                segment.trbs.set(index,super::super::ring::TrbData([0,0,1<<24,(33<<10)|1]));
++            }
++        }
++        for _ in 0..TRBS_PER_SEGMENT*2 {assert!(ring.next().is_some());}
++        assert_eq!((ring.segment_index,ring.trb_index,ring.cycle),(0,0,false));
++        assert!(ring.next().is_none()); // stale entries from previous cycle
++        ring.segments[0].trbs.set(0,super::super::ring::TrbData([0,0,1<<24,33<<10]));
++        assert!(ring.next().is_some());
++        assert!(ring.next().is_none());
++    }
++    #[test]
++    fn producer_cycle_and_link_wrap_follow_free_slot_ownership() {
++        let kernel=Kernel::new(u64::MAX,&MEMORY);
++        let mut ring=Ring::new_segment(true,DmaDirection::ToDevice,&kernel).unwrap();
++        for _ in 0..TRBS_PER_SEGMENT-1 {
++            ring.enque_command(xhci::ring::trb::command::Noop::new().into());
++        }
++        assert!(!ring.cycle);
++        assert_eq!(ring.i,0);
++        let link=ring.trbs.read(TRBS_PER_SEGMENT-1).unwrap().to_raw();
++        assert_eq!(link[3]&1,1);
++        ring.enque_command(xhci::ring::trb::command::Noop::new().into());
++        assert_eq!(ring.trbs.read(0).unwrap().to_raw()[3]&1,0);
++    }
++
++}
+diff --git a/usb-host/src/backend/kmod/xhci/reg.rs b/usb-host/src/backend/kmod/xhci/reg.rs
+index 9eb9bc8..e3a49d0 100644
+--- a/usb-host/src/backend/kmod/xhci/reg.rs
++++ b/usb-host/src/backend/kmod/xhci/reg.rs
+@@ -49,6 +49,7 @@ impl XhciRegisters {
+         unsafe { Registers::new(self.mmio_base, mapper) }
+     }
+ 
++    #[cfg(not(feature = "hosted-direct"))]
+     pub fn disable_irq_guard(&mut self) -> DisableIrqGuard {
+         let mut enable = true;
+         self.operational.usbcmd.update_volatile(|r| {
+@@ -76,10 +77,12 @@ impl DerefMut for XhciRegisters {
+     }
+ }
+ 
++#[cfg(not(feature = "hosted-direct"))]
+ pub struct DisableIrqGuard {
+     reg: Registers,
+     enable: bool,
+ }
++#[cfg(not(feature = "hosted-direct"))]
+ impl Drop for DisableIrqGuard {
+     fn drop(&mut self) {
+         if self.enable {
+diff --git a/usb-host/src/backend/kmod/xhci/ring.rs b/usb-host/src/backend/kmod/xhci/ring.rs
+index 4c44966..e1469a8 100644
+--- a/usb-host/src/backend/kmod/xhci/ring.rs
++++ b/usb-host/src/backend/kmod/xhci/ring.rs
+@@ -18,7 +18,7 @@ const DEFAULT_RING_PAGES: usize = 2;
+ 
+ #[derive(Clone)]
+ #[repr(transparent)]
+-pub struct TrbData([u32; TRB_LEN]);
++pub struct TrbData(pub(crate) [u32; TRB_LEN]);
+ 
+ impl TrbData {
+     pub fn to_raw(&self) -> [u32; TRB_LEN] {
+@@ -134,11 +134,24 @@ impl Ring {
+     }
+ 
+     fn set_transfer_trb(&mut self, index: usize, trb: transfer::Allowed) {
+-        self.trbs.set(index, trb.into());
++        self.write_trb(index, trb.into());
++    }
++
++    /// Publish a TRB with the ownership dword last. Caller owns this free slot;
++    /// ring-space accounting must prevent overwriting a controller-owned entry.
++    fn write_trb(&mut self, index: usize, trb: TrbData) {
++        assert!(index < self.trbs.len());
++        let base = unsafe { self.trbs.as_ptr().as_ptr().cast::<u32>().add(index * 4) };
++        unsafe {
++            for word in 0..3 { base.add(word).write_volatile(trb.0[word]); }
++            mb();
++            base.add(3).write_volatile(trb.0[3]);
++        }
++        self.trbs.confirm_write(index * TRB_SIZE, TRB_SIZE);
+     }
+ 
+     pub fn enque_trb(&mut self, trb: TrbData) -> BusAddr {
+-        self.trbs.set(self.i, trb);
++        self.write_trb(self.i, trb);
+         let addr = self.trb_bus_addr(self.i);
+         self.next_index();
+         addr
+@@ -164,7 +177,7 @@ impl Ring {
+             }
+             let trb = command::Allowed::Link(link);
+ 
+-            self.trbs.set(len - 1, trb.into());
++            self.write_trb(len - 1, trb.into());
+ 
+             self.cycle = !self.cycle;
+         } else if self.i >= len {
+diff --git a/usb-host/src/backend/kmod/xhci/sync.rs b/usb-host/src/backend/kmod/xhci/sync.rs
+index 8052e81..80e3c81 100644
+--- a/usb-host/src/backend/kmod/xhci/sync.rs
++++ b/usb-host/src/backend/kmod/xhci/sync.rs
+@@ -3,10 +3,13 @@ use core::cell::UnsafeCell;
+ 
+ use spin::{Mutex, RwLock};
+ 
+-use super::reg::{DisableIrqGuard, XhciRegisters};
++use super::reg::XhciRegisters;
++#[cfg(not(feature = "hosted-direct"))]
++use super::reg::DisableIrqGuard;
+ 
+ pub(crate) struct IrqLock<T> {
+     inner: Mutex<()>,
++    #[cfg(not(feature = "hosted-direct"))]
+     reg: Arc<RwLock<XhciRegisters>>,
+     data: UnsafeCell<T>,
+ }
+@@ -16,23 +19,29 @@ unsafe impl<T> Send for IrqLock<T> where T: Send {}
+ 
+ impl<T> IrqLock<T> {
+     pub fn new(data: T, reg: Arc<RwLock<XhciRegisters>>) -> Self {
++        #[cfg(feature = "hosted-direct")]
++        let _ = reg;
+         Self {
+             inner: Mutex::new(()),
++            #[cfg(not(feature = "hosted-direct"))]
+             reg,
+             data: UnsafeCell::new(data),
+         }
+     }
+ 
+     pub fn lock(&self) -> IrqLockGuard<'_, T> {
++        #[cfg(not(feature = "hosted-direct"))]
+         let _disable_guard = self.reg.write().disable_irq_guard();
+         let guard = self.inner.lock();
+         IrqLockGuard {
+             _guard: guard,
+             data: unsafe { &mut *self.data.get() },
++            #[cfg(not(feature = "hosted-direct"))]
+             _disable_guard,
+         }
+     }
+ 
++    #[cfg(not(feature = "hosted-direct"))]
+     #[allow(clippy::mut_from_ref)]
+     pub unsafe fn force_use(&self) -> &mut T {
+         unsafe { &mut *self.data.get() }
+@@ -42,6 +51,7 @@ impl<T> IrqLock<T> {
+ pub(crate) struct IrqLockGuard<'a, T> {
+     _guard: spin::MutexGuard<'a, ()>,
+     data: &'a mut T,
++    #[cfg(not(feature = "hosted-direct"))]
+     _disable_guard: DisableIrqGuard,
+ }
+ 
+@@ -58,3 +68,23 @@ impl<'a, T> core::ops::DerefMut for IrqLockGuard<'a, T> {
+         self.data
+     }
+ }
++
++#[cfg(all(test, feature = "hosted-direct"))]
++mod hosted_tests {
++    use super::*;
++    #[test]
++    fn registration_and_dispatch_share_software_exclusion() {
++        let queues = Arc::new(IrqLock {inner: Mutex::new(()), data: UnsafeCell::new(alloc::collections::BTreeMap::new())});
++        let workers: alloc::vec::Vec<_> = (0..4).map(|_| {
++            let queues = queues.clone();
++            std::thread::spawn(move || {
++                for index in 0..10000 {
++                    let mut map = queues.lock();
++                    *map.entry(index % 16).or_insert(0usize) += 1;
++                }
++            })
++        }).collect();
++        for worker in workers { worker.join().unwrap(); }
++        assert_eq!(queues.lock().values().sum::<usize>(),40000);
++    }
++}
+diff --git a/usb-host/src/backend/kmod/xhci/transfer.rs b/usb-host/src/backend/kmod/xhci/transfer.rs
+index 7ea3969..bd6e0cf 100644
+--- a/usb-host/src/backend/kmod/xhci/transfer.rs
++++ b/usb-host/src/backend/kmod/xhci/transfer.rs
+@@ -43,7 +43,11 @@ impl TransferResultHandler {
+     /// pre-registered queue completion slot, then wakes queue-local waiters.
+     pub unsafe fn set_finished(&self, slot_id: u8, ep_id: u8, ptr: BusAddr, res: TransferEvent) {
+         let queue_id = TransQueueId { slot_id, ep_id };
+-        if let Some(q) = unsafe { self.inner.force_use().get(&queue_id) } {
++        #[cfg(feature = "hosted-direct")]
++        let queues = self.inner.lock();
++        #[cfg(not(feature = "hosted-direct"))]
++        let queues = unsafe { self.inner.force_use() };
++        if let Some(q) = queues.get(&queue_id) {
+             trace!(
+                 "xhci: dispatch transfer event slot={} ep={} ptr={:#x} code={:?} len={}",
+                 slot_id,
+diff --git a/usb-host/src/host.rs b/usb-host/src/host.rs
+index 63c6152..a73efd2 100644
+--- a/usb-host/src/host.rs
++++ b/usb-host/src/host.rs
+@@ -57,6 +57,7 @@ pub struct EventHandler {
+ }
+ 
+ impl EventHandler {
++    pub(crate) fn from_inner(handler:Box<dyn EventHandlerOp>)->Self {Self{handler}}
+     /// 处理事件
+     pub fn handle_event(&self) -> Event {
+         self.handler.handle_event()
