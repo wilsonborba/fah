@@ -86,3 +86,17 @@ fn guest_target_policy_rejects_host_paths_and_unknown_models() {
     assert!(validate_guest_target("run-1", "run-1", 0x8086, 0x7a60, "0000:00:14.0").is_err());
     assert!(validate_guest_target("run-1", "run-1", 0x1b36, 0x000d, "../../etc/x").is_err());
 }
+
+#[test]
+fn xhci_register_blocks_are_checked_before_accessor_construction() {
+    let mut header = [0u8; 32];
+    header[0] = 0x40;
+    header[2..4].copy_from_slice(&0x100u16.to_le_bytes());
+    header[4..8].copy_from_slice(&((4u32 << 24) | 64).to_le_bytes());
+    header[20..24].copy_from_slice(&0x2000u32.to_le_bytes());
+    header[24..28].copy_from_slice(&0x1000u32.to_le_bytes());
+    assert!(fah::dal::local::resources::register_layout(&header, 0x3000).is_ok());
+    assert!(fah::dal::local::resources::register_layout(&header, 0x2000).is_err());
+    header[24..28].copy_from_slice(&0u32.to_le_bytes());
+    assert!(fah::dal::local::resources::register_layout(&header, 0x3000).is_err());
+}

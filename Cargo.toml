@@ -16,7 +16,7 @@ path = "src/main.rs"
 
 [features]
 default = []
-hosted-direct = ["dep:crab-usb", "dep:vfio-ioctls", "crab-usb/hosted-direct", "dep:libc", "dep:vmm-sys-util", "dep:dma-api"]
+hosted-direct = ["dep:crab-usb", "dep:vfio-ioctls", "crab-usb/hosted-direct", "dep:libc", "dep:vmm-sys-util", "dep:dma-api", "dep:futures"]
 
 [dependencies]
 crab-usb = { path = ".fah-cache/CrabUSB/usb-host", optional = true, default-features = false }
@@ -29,3 +29,7 @@ dma-api = { version = "=0.7.3", optional = true, features = ["fah-vfio"] }
 
 [patch.crates-io]
 dma-api = { path = ".fah-cache/dma-api" }
+
+[dependencies.futures]
+version = "0.3"
+optional = true

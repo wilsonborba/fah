@@ -59,3 +59,8 @@ pub mod resources;
 
 #[cfg(feature = "hosted-direct")]
 pub mod events;
+
+pub mod iommu;
+
+#[cfg(feature = "hosted-direct")]
+pub mod controller;

@@ -84,6 +84,33 @@ index 71b939e..4ab690c 100644
 -        println!("raw: {:#x}", rs.0);
 -    }
 -}
+diff --git a/usb-host/src/backend/kmod/mod.rs b/usb-host/src/backend/kmod/mod.rs
+index e17466d..fe8a849 100644
+--- a/usb-host/src/backend/kmod/mod.rs
++++ b/usb-host/src/backend/kmod/mod.rs
+@@ -50,3 +50,22 @@ pub struct DeviceAddressInfo {
+     pub port_id: u8,
+     pub infos: BTreeMap<Id<Hub>, HubInfo>,
+ }
++
++/// Direct hosted entry point sharing the existing xHCI engine. Unlike the
++/// convenience Core, initialization does not discover/reset root-hub ports.
++#[cfg(feature = "hosted-direct")]
++pub struct ExplicitHost {pub(crate) core:Xhci}
++#[cfg(feature = "hosted-direct")]
++impl ExplicitHost {
++    /// # Safety
++    /// MMIO must cover all validated register/extended-capability spans and
++    /// outlive this owner and its sole event handler. Kernel/DMA resources must
++    /// remain alive through confirmed stop and successful unmap.
++    pub unsafe fn new(mmio:Mmio,kernel:&'static dyn KernelOp)->Result<Self> {
++        Ok(Self {core:Xhci::new(mmio,kernel)?})
++    }
++    pub async fn initialize(&mut self)->Result<()> {self.core.init().await}
++    pub fn event_handler(&mut self)->crate::EventHandler {
++        crate::EventHandler::from_inner(self.core.create_event_handler())
++    }
++}
 diff --git a/usb-host/src/backend/kmod/transfer.rs b/usb-host/src/backend/kmod/transfer.rs
 index 7efe34d..9354d97 100644
 --- a/usb-host/src/backend/kmod/transfer.rs
@@ -386,3 +413,15 @@ index 7ea3969..bd6e0cf 100644
              trace!(
                  "xhci: dispatch transfer event slot={} ep={} ptr={:#x} code={:?} len={}",
                  slot_id,
+diff --git a/usb-host/src/host.rs b/usb-host/src/host.rs
+index 63c6152..a73efd2 100644
+--- a/usb-host/src/host.rs
++++ b/usb-host/src/host.rs
+@@ -57,6 +57,7 @@ pub struct EventHandler {
+ }
+ 
+ impl EventHandler {
++    pub(crate) fn from_inner(handler:Box<dyn EventHandlerOp>)->Self {Self{handler}}
+     /// 处理事件
+     pub fn handle_event(&self) -> Event {
+         self.handler.handle_event()
