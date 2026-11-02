@@ -54,3 +54,6 @@ pub mod iova;
 pub mod dma;
 
 pub mod resources;
+
+#[cfg(feature = "hosted-direct")]
+pub mod events;

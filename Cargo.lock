@@ -215,6 +215,7 @@ dependencies = [
  "serde",
  "serde_json",
  "vfio-ioctls",
+ "vmm-sys-util",
 ]
 
 [[package]]
