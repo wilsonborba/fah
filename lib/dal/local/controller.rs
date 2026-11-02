@@ -77,8 +77,9 @@ impl LocalController {
         let base = mapping.pointer().as_ptr();
         let length = mapping.length();
         let mut header = [0u8; 32];
-        for (index, value) in header.iter_mut().enumerate() {
-            *value = unsafe { base.add(index).read_volatile() };
+        for (index, chunk) in header.chunks_exact_mut(4).enumerate() {
+            let value = unsafe { base.cast::<u32>().add(index).read_volatile() };
+            chunk.copy_from_slice(&value.to_le_bytes());
         }
         let layout = resources::register_layout(&header, length)?;
         // Validate the full extended capability chain before CrabUSB traverses it.
@@ -143,14 +144,22 @@ impl LocalController {
         self.binding = Some(binding.clone());
         // Enable Memory Space and Bus Master only after guest-only ownership and maps.
         // Config writes use checked pwrite rather than the library's log-only wrapper.
-        let config = resource.device.get_region_offset(7);
+        if resource.device.get_region_size(7) < 6 || resource.device.get_region_flags(7) & 3 != 3 {
+            return Err("PCI configuration region unavailable or read-only".into());
+        }
+        let config = resource
+            .device
+            .get_region_offset(7)
+            .checked_add(4)
+            .and_then(|offset| i64::try_from(offset).ok())
+            .ok_or("PCI configuration offset overflow")?;
         let mut command = [0u8; 2];
         let read = unsafe {
             libc::pread(
                 resource.device.as_raw_fd(),
                 command.as_mut_ptr().cast(),
                 2,
-                (config + 4) as i64,
+                config,
             )
         };
         if read != 2 {
@@ -162,7 +171,7 @@ impl LocalController {
                 resource.device.as_raw_fd(),
                 command.as_ptr().cast(),
                 2,
-                (config + 4) as i64,
+                config,
             )
         };
         if written != 2 {
