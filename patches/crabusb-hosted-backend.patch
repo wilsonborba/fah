@@ -138,6 +138,45 @@ index 7efe34d..9354d97 100644
                      .map_err(|err| TransferError::Other(anyhow!("DMA mapping failed: {err}")))?,
              )
          } else {
+diff --git a/usb-host/src/backend/kmod/xhci/endpoint.rs b/usb-host/src/backend/kmod/xhci/endpoint.rs
+index 5c11453..31918f2 100644
+--- a/usb-host/src/backend/kmod/xhci/endpoint.rs
++++ b/usb-host/src/backend/kmod/xhci/endpoint.rs
+@@ -608,10 +608,10 @@ impl EndpointOp for Endpoint {
+                 transfer.confirm_write_all();
+             }
+             data_bus_addr = transfer.dma_addr();
+-            let buffer_end = data_bus_addr + transfer.buffer_len() as u64;
+-            if data_bus_addr > self.kernel.dma_mask() || buffer_end > self.kernel.dma_mask() {
++            let buffer_end = data_bus_addr.checked_add((transfer.buffer_len() - 1) as u64);
++            if !dma_buffer_fits(data_bus_addr, transfer.buffer_len(), self.kernel.dma_mask()) {
+                 return Err(TransferError::Other(anyhow!(
+-                    "DMA buffer [{:#x}, {:#x}) exceeds controller DMA mask {:#x}",
++                    "DMA buffer start={:#x}, inclusive_end={:?} exceeds controller DMA mask {:#x}",
+                     data_bus_addr,
+                     buffer_end,
+                     self.kernel.dma_mask()
+@@ -882,3 +882,20 @@ impl EndpointDescriptorExt for EndpointDescriptor {
+         }
+     }
+ }
++
++fn dma_buffer_fits(start:u64,length:usize,mask:u64)->bool {
++    length>0 && start.checked_add((length-1) as u64).is_some_and(|last|last<=mask)
++}
++#[cfg(test)]
++mod dma_mask_tests {
++    use super::dma_buffer_fits;
++    #[test]
++    fn inclusive_end_and_overflow() {
++        assert!(dma_buffer_fits(0xffff,1,0xffff));
++        assert!(dma_buffer_fits(0xff00,256,0xffff));
++        assert!(!dma_buffer_fits(0xff00,257,0xffff));
++        assert!(dma_buffer_fits(u64::MAX,1,u64::MAX));
++        assert!(!dma_buffer_fits(u64::MAX,2,u64::MAX));
++        assert!(!dma_buffer_fits(0,0,u64::MAX));
++    }
++}
 diff --git a/usb-host/src/backend/kmod/xhci/event.rs b/usb-host/src/backend/kmod/xhci/event.rs
 index 27eeae2..12f8e2b 100644
 --- a/usb-host/src/backend/kmod/xhci/event.rs
