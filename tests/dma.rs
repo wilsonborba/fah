@@ -114,3 +114,23 @@ fn failed_map_rolls_back_and_does_not_retain_storage() {
         a.reclaim_retired_after_quiescence().unwrap();
     }
 }
+
+#[test]
+fn real_coherent_array_sync_does_not_require_bounce_storage() {
+    let provider = Fake::default();
+    let adapter = Box::leak(Box::new(
+        DmaAdapter::new(provider.clone(), &[(0x1000, 0xfffff)], u64::MAX, 4096).unwrap(),
+    ));
+    let dma = dma_api::DeviceDma::new(u64::MAX, adapter);
+    let mut array = dma
+        .array_zero_with_align::<u32>(16, 64, DmaDirection::Bidirectional)
+        .unwrap();
+    array.set(3, 0x12345678);
+    assert_eq!(array.read(3), Some(0x12345678));
+    drop(array);
+    assert_eq!(provider.maps.lock().unwrap().len(), 1);
+    unsafe {
+        adapter.reclaim_retired_after_quiescence().unwrap();
+    }
+    assert!(provider.maps.lock().unwrap().is_empty());
+}
