@@ -52,3 +52,5 @@ pub mod iova;
 
 #[cfg(feature = "hosted-direct")]
 pub mod dma;
+
+pub mod resources;
