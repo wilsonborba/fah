@@ -200,7 +200,7 @@ index 7efe34d..9354d97 100644
              )
          } else {
 diff --git a/usb-host/src/backend/kmod/xhci/device.rs b/usb-host/src/backend/kmod/xhci/device.rs
-index a7996fc..a9f727a 100644
+index a7996fc..92f12d8 100644
 --- a/usb-host/src/backend/kmod/xhci/device.rs
 +++ b/usb-host/src/backend/kmod/xhci/device.rs
 @@ -161,13 +161,7 @@ impl Device {
@@ -250,7 +250,16 @@ index a7996fc..a9f727a 100644
              .await?;
  
          debug!("Address slot ok {result:x?}");
-@@ -765,3 +767,46 @@ impl DeviceOp for Device {
+@@ -528,7 +530,7 @@ impl Device {
+             input
+                 .device_mut()
+                 .slot_mut()
+-                .set_context_entries(max_dci + 1)
++                .set_context_entries(context_entries(max_dci))
+         });
+         mb();
+ 
+@@ -765,3 +767,59 @@ impl DeviceOp for Device {
          self.update_hub_inner(params).boxed()
      }
  }
@@ -295,6 +304,19 @@ index a7996fc..a9f727a 100644
 +        for speed in [Speed::Low,Speed::Full,Speed::High,Speed::SuperSpeed,Speed::SuperSpeedPlus] {assert!(decode_ep0_packet_size(speed,0).is_err());}
 +        assert!(decode_ep0_packet_size(Speed::Low,64).is_err());
 +        assert!(decode_ep0_packet_size(Speed::High,8).is_err());
++    }
++}
++
++fn context_entries(highest_dci:u8)->u8 {highest_dci.max(1)}
++#[cfg(test)]
++mod context_entries_tests {
++    use super::context_entries;
++    #[test]
++    fn field_is_highest_endpoint_context_index() {
++        assert_eq!(context_entries(0),1);
++        assert_eq!(context_entries(1),1);
++        assert_eq!(context_entries(3),3);
++        assert_eq!(context_entries(31),31);
 +    }
 +}
 diff --git a/usb-host/src/backend/kmod/xhci/endpoint.rs b/usb-host/src/backend/kmod/xhci/endpoint.rs
