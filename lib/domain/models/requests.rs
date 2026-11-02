@@ -145,3 +145,22 @@ pub struct RequestReport {
     pub timed_out: bool,
     pub data: Option<Vec<u8>>,
 }
+
+#[derive(Debug, Clone)]
+pub struct BackendAbort {
+    pub completed: Vec<(u64, BackendCompletion)>,
+    pub aborted: Vec<u64>,
+    pub restart_ready: bool,
+    pub error: Option<OperationError>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AbortReport {
+    pub target: RequestId,
+    pub device: DeviceId,
+    pub endpoint: u8,
+    pub scope: String,
+    pub completed: Vec<RequestId>,
+    pub aborted: Vec<RequestId>,
+    pub restart_ready: bool,
+    pub error: Option<OperationError>,
+}

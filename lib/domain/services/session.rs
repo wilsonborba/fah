@@ -87,6 +87,17 @@ impl<B: ControllerBackend> Session<B> {
         }
         Ok(self.backend.as_mut().unwrap())
     }
+    pub(crate) fn recovery_backend(&mut self) -> Result<&mut B, OperationError> {
+        if !matches!(
+            self.state,
+            ControllerState::Initialized | ControllerState::RecoveryRequired
+        ) {
+            return Err(OperationError::validation(
+                "controller unavailable for recovery",
+            ));
+        }
+        Ok(self.backend.as_mut().unwrap())
+    }
     pub fn recovery_required(&mut self) {
         if self.state != ControllerState::Closed {
             self.state = ControllerState::RecoveryRequired;

@@ -458,3 +458,154 @@ fn bounded_pending_capacity_rejects_without_publishing_or_losing_buffers() {
     usb.close().unwrap();
     assert!(state.lock().unwrap().pending.is_empty());
 }
+
+use fah::domain::services::recovery::RecoveryBackend;
+impl RecoveryBackend for Fake {
+    fn abort_endpoint(&mut self, slot: u8, endpoint: u8) -> Result<BackendAbort, OperationError> {
+        self.effect("stop:submitted")?;
+        self.effect("stop:completed")?;
+        let mut state = self.0.lock().unwrap();
+        let tokens: Vec<_> = state
+            .pending
+            .iter()
+            .filter(|(_, request)| {
+                request.metadata.device.slot == slot && request.metadata.endpoint == endpoint
+            })
+            .map(|(token, _)| *token)
+            .collect();
+        let mut completed = Vec::new();
+        let mut aborted = Vec::new();
+        for token in tokens {
+            if let Some(result) = state.completions.remove(&token)
+                && result.quiescent
+                && result.error.is_none()
+            {
+                completed.push((token, result));
+            } else {
+                aborted.push(token);
+            }
+            state.trace.push(format!("retire:{token}"));
+            state.pending.remove(&token);
+        }
+        drop(state);
+        let error = self.effect("rebase:completed").err();
+        Ok(BackendAbort {
+            completed,
+            aborted,
+            restart_ready: error.is_none(),
+            error,
+        })
+    }
+}
+#[test]
+fn hardware_abort_reports_endpoint_siblings_and_allows_restart() {
+    let (mut usb, state, device) = addressed();
+    usb.set_configuration(device, 2).unwrap();
+    usb.descriptor(
+        device,
+        DescriptorRequest {
+            kind: 2,
+            index: 0,
+            language: 0,
+            length: 25,
+        },
+    )
+    .unwrap();
+    usb.setup_endpoints(device, 0, 0).unwrap();
+    let first = usb.submit_request(control(device, 2)).unwrap().id;
+    let sibling = usb.submit_request(control(device, 2)).unwrap().id;
+    let other = usb
+        .submit_request(RequestSpec {
+            device,
+            endpoint: 129,
+            transfer_type: TransferType::Interrupt,
+            direction: Direction::In,
+            length: 8,
+            setup: None,
+            data: vec![],
+        })
+        .unwrap()
+        .id;
+    usb.logical_cancel_request(first).unwrap();
+    let abort = usb.abort_request(first).unwrap();
+    assert!(abort.restart_ready);
+    assert_eq!(abort.aborted, vec![first, sibling]);
+    assert!(abort.completed.is_empty());
+    assert!(matches!(
+        usb.request_status(first).unwrap().state,
+        RequestState::Aborted
+    ));
+    assert!(matches!(
+        usb.request_status(other).unwrap().state,
+        RequestState::Pending { .. }
+    ));
+    assert_eq!(state.lock().unwrap().pending.len(), 1);
+    let trace = state.lock().unwrap().trace.clone();
+    let proof = trace.iter().position(|op| op == "stop:completed").unwrap();
+    assert!(
+        trace
+            .iter()
+            .enumerate()
+            .filter(|(_, op)| op.starts_with("retire:"))
+            .all(|(index, _)| index > proof)
+    );
+    usb.reclaim_request(first).unwrap();
+    usb.reclaim_request(sibling).unwrap();
+    // A stale/late completion cannot bind to the next monotonically unique token.
+    state
+        .lock()
+        .unwrap()
+        .completions
+        .insert(1, complete(2, 1, vec![99, 99]));
+    let next = usb.submit_request(control(device, 2)).unwrap().id;
+    assert!(matches!(
+        usb.poll_request(next).unwrap().state,
+        RequestState::Pending { .. }
+    ));
+}
+#[test]
+fn completion_before_stop_is_reported_as_completed_not_aborted() {
+    let (mut usb, state, device) = addressed();
+    let first = usb.submit_request(control(device, 2)).unwrap().id;
+    let sibling = usb.submit_request(control(device, 2)).unwrap().id;
+    state
+        .lock()
+        .unwrap()
+        .completions
+        .insert(1, complete(2, 1, vec![7, 8]));
+    let result = usb.abort_request(first).unwrap();
+    assert_eq!(result.completed, vec![first]);
+    assert_eq!(result.aborted, vec![sibling]);
+    assert_eq!(usb.request_status(first).unwrap().data, Some(vec![7, 8]));
+}
+#[test]
+fn missing_stop_confirmation_retains_every_buffer() {
+    let (mut usb, state, device) = addressed();
+    let id = usb.submit_request(control(device, 2)).unwrap().id;
+    state.lock().unwrap().fail = Some("stop:completed");
+    assert!(usb.abort_request(id).is_err());
+    assert_eq!(usb.session.state(), ControllerState::RecoveryRequired);
+    assert_eq!(state.lock().unwrap().pending.len(), 1);
+    assert!(usb.reclaim_request(id).is_err());
+    assert!(
+        !state
+            .lock()
+            .unwrap()
+            .trace
+            .iter()
+            .any(|op| op.starts_with("retire:"))
+    );
+}
+#[test]
+fn rebase_failure_keeps_confirmed_abort_but_requires_controller_recovery() {
+    let (mut usb, state, device) = addressed();
+    let id = usb.submit_request(control(device, 2)).unwrap().id;
+    state.lock().unwrap().fail = Some("rebase:completed");
+    let result = usb.abort_request(id).unwrap();
+    assert!(!result.restart_ready && result.error.is_some());
+    assert_eq!(result.aborted, vec![id]);
+    assert!(state.lock().unwrap().pending.is_empty());
+    assert_eq!(usb.session.state(), ControllerState::RecoveryRequired);
+    usb.reclaim_request(id).unwrap();
+    assert!(usb.submit_request(control(device, 2)).is_err());
+}
