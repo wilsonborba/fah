@@ -1,0 +1,17 @@
+# Rust build artifacts
+target/
+**/*.rs.bk
+*.pdb
+
+# Secrets and private configuration
+.env
+.env.*
+!.env.example
+
+# Local assistant, scratch notes, and temporary working documents (Hippocampus Rule 9)
+docs/
+*.log
+
+# OS metadata
+.DS_Store
+Thumbs.db
