@@ -47,3 +47,5 @@
 //! Neither codegen, Miri, successful compilation nor runtime tests alone prove
 //! correctness of hardware DMA. Coherent x86 caches remove cache maintenance,
 //! not ordering, aliasing, or lifetime obligations.
+
+pub mod iova;
