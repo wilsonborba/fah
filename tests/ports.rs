@@ -76,7 +76,7 @@ fn actual_backend_port_inspection_leaves_fake_mmio_unchanged() {
     let adapter = Box::leak(Box::new(
         DmaAdapter::new(Provider, &[(0x1000, 0xffffff)], u64::MAX, 4096).unwrap(),
     ));
-    let host = unsafe { crab_usb::ExplicitHost::new(base, adapter) }.unwrap();
+    let mut host = unsafe { crab_usb::ExplicitHost::new(base, adapter) }.unwrap();
     assert_eq!(host.port_count(), 2);
     assert_eq!(host.port_status(2).unwrap(), 1 | (3 << 10) | (1 << 17));
     assert!(host.port_status(0).is_err());
@@ -84,6 +84,34 @@ fn actual_backend_port_inspection_leaves_fake_mmio_unchanged() {
     assert_eq!(before, unsafe {
         std::slice::from_raw_parts(base.as_ptr(), layout.size())
     });
+    // Explicit mutation is tested with a cooperatively simulated controller.
+    // CPU writes happen strictly between future polls, never on another thread.
+    let port = unsafe { base.as_ptr().add(0x440).cast::<u32>() };
+    unsafe {
+        port.write_volatile(3 | (1 << 9) | (1 << 10) | (1 << 17));
+    }
+    {
+        use std::{
+            future::Future,
+            task::{Context, Poll},
+        };
+        let future = host.reset_port(1, false);
+        let mut future = std::pin::pin!(future);
+        let mut context = Context::from_waker(futures::task::noop_waker_ref());
+        assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+        assert_eq!(unsafe { port.read_volatile() }, (1 << 9) | (1 << 4));
+        // Simulate completed reset, preserving its hardware change indicator.
+        unsafe {
+            port.write_volatile(3 | (1 << 9) | (1 << 10) | (1 << 21));
+        }
+        assert!(matches!(
+            future.as_mut().poll(&mut context),
+            Poll::Ready(Ok(()))
+        ));
+    }
+    host.acknowledge_port(1, 1 << 21).unwrap();
+    assert_eq!(unsafe { port.read_volatile() }, (1 << 9) | (1 << 21));
+    assert!(host.acknowledge_port(1, 1 << 4).is_err());
     drop(host);
     unsafe {
         adapter.reclaim_retired_after_quiescence().unwrap();

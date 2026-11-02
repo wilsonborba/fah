@@ -35,6 +35,9 @@ impl<B: ControllerBackend> Session<B> {
             requests: RequestLedger::new(session_id),
         }
     }
+    pub fn identity(&self) -> u64 {
+        self.requests.session_id()
+    }
     pub fn state(&self) -> ControllerState {
         self.state
     }

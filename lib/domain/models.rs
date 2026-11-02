@@ -98,6 +98,9 @@ impl RequestLedger {
             entries: BTreeMap::new(),
         }
     }
+    pub(crate) fn session_id(&self) -> u64 {
+        self.session
+    }
     pub fn submit(&mut self) -> Result<RequestId, OperationError> {
         let sequence = self.next;
         self.next = self
