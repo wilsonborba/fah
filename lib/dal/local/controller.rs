@@ -365,3 +365,77 @@ fn usb_error(error: crab_usb::usb_if::err::USBError) -> OperationError {
         completion_code: None,
     }
 }
+
+impl crate::domain::services::usb::ConfigurationBackend for LocalController {
+    fn descriptor(
+        &mut self,
+        slot: u8,
+        request: crate::domain::models::descriptors::DescriptorRequest,
+    ) -> Result<Vec<u8>, OperationError> {
+        device_future(
+            self.host
+                .as_mut()
+                .ok_or_else(|| OperationError::validation("controller not initialized"))?
+                .descriptor(
+                    slot,
+                    request.kind,
+                    request.index,
+                    request.language,
+                    request.length,
+                ),
+        )
+    }
+    fn ep0_packet_size(&mut self, slot: u8, size: u16) -> Result<(), OperationError> {
+        device_future(
+            self.host
+                .as_mut()
+                .ok_or_else(|| OperationError::validation("controller not initialized"))?
+                .ep0_packet_size(slot, size),
+        )
+    }
+    fn set_configuration(&mut self, slot: u8, value: u8) -> Result<(), OperationError> {
+        device_future(
+            self.host
+                .as_mut()
+                .ok_or_else(|| OperationError::validation("controller not initialized"))?
+                .set_configuration(slot, value),
+        )
+    }
+    fn set_interface(
+        &mut self,
+        slot: u8,
+        interface: u8,
+        alternate: u8,
+    ) -> Result<(), OperationError> {
+        device_future(
+            self.host
+                .as_mut()
+                .ok_or_else(|| OperationError::validation("controller not initialized"))?
+                .set_interface(slot, interface, alternate),
+        )
+    }
+    fn setup_endpoints(
+        &mut self,
+        slot: u8,
+        interface: u8,
+        alternate: u8,
+        bytes: &[u8],
+    ) -> Result<Vec<crate::domain::services::usb::EndpointSnapshot>, OperationError> {
+        let infos = device_future(
+            self.host
+                .as_mut()
+                .ok_or_else(|| OperationError::validation("controller not initialized"))?
+                .setup_endpoints(slot, interface, alternate, bytes),
+        )?;
+        Ok(infos
+            .into_iter()
+            .map(|info| crate::domain::services::usb::EndpointSnapshot {
+                address: info.address.raw(),
+                transfer_type: format!("{:?}", info.transfer_type).to_lowercase(),
+                direction: format!("{:?}", info.direction).to_lowercase(),
+                max_packet_size: info.max_packet_size,
+                interval: info.interval,
+            })
+            .collect())
+    }
+}

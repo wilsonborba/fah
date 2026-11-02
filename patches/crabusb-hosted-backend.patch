@@ -96,10 +96,10 @@ index 71b939e..4ab690c 100644
 -    }
 -}
 diff --git a/usb-host/src/backend/kmod/mod.rs b/usb-host/src/backend/kmod/mod.rs
-index e17466d..00ea254 100644
+index e17466d..26e4d2d 100644
 --- a/usb-host/src/backend/kmod/mod.rs
 +++ b/usb-host/src/backend/kmod/mod.rs
-@@ -50,3 +50,84 @@ pub struct DeviceAddressInfo {
+@@ -50,3 +50,99 @@ pub struct DeviceAddressInfo {
      pub port_id: u8,
      pub infos: BTreeMap<Id<Hub>, HubInfo>,
  }
@@ -177,6 +177,21 @@ index e17466d..00ea254 100644
 +        let op=reg.capability.caplength.read_volatile().get() as usize;
 +        unsafe {((reg.mmio_base+op+0x400+(port as usize-1)*16)as *mut u32).write_volatile(value);}
 +    }
++    pub async fn descriptor(&mut self,slot:u8,kind:u8,index:u8,language:u16,length:u16)->Result<alloc::vec::Vec<u8>> {
++        self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.explicit_descriptor(kind,index,language,length).await
++    }
++    pub async fn ep0_packet_size(&mut self,slot:u8,size:u16)->Result<()> {
++        self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.explicit_packet_size(size).await
++    }
++    pub async fn set_configuration(&mut self,slot:u8,value:u8)->Result<()> {
++        self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.explicit_configuration(value).await
++    }
++    pub async fn set_interface(&mut self,slot:u8,interface:u8,alternate:u8)->Result<()> {
++        self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.explicit_interface(interface,alternate).await
++    }
++    pub async fn setup_endpoints(&mut self,slot:u8,interface:u8,alternate:u8,bytes:&[u8])->Result<alloc::vec::Vec<usb_if::endpoint::EndpointInfo>> {
++        self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.explicit_endpoints(interface,alternate,bytes).await
++    }
 +    pub fn event_handler(&mut self)->crate::EventHandler {
 +        crate::EventHandler::from_inner(self.core.create_event_handler())
 +    }
@@ -200,12 +215,21 @@ index 7efe34d..9354d97 100644
              )
          } else {
 diff --git a/usb-host/src/backend/kmod/xhci/device.rs b/usb-host/src/backend/kmod/xhci/device.rs
-index a7996fc..0a0a748 100644
+index a7996fc..8c92691 100644
 --- a/usb-host/src/backend/kmod/xhci/device.rs
 +++ b/usb-host/src/backend/kmod/xhci/device.rs
-@@ -161,13 +161,7 @@ impl Device {
+@@ -159,30 +159,61 @@ impl Device {
+         Ok(())
+     }
  
-     async fn setup_max_packet(&mut self, desc: DeviceDescriptorBase) -> Result {
+-    async fn setup_max_packet(&mut self, desc: DeviceDescriptorBase) -> Result {
++    async fn setup_max_packet(&mut self,desc:DeviceDescriptorBase)->Result {
++        let packet_size=decode_ep0_packet_size(self.port_speed,desc.max_packet_size_0)?;
++        self.explicit_packet_size(packet_size).await
++    }
++    pub(crate) async fn explicit_packet_size(&mut self,packet_size:u16)->Result {
++        let valid=match self.port_speed {Speed::Low=>packet_size==8,Speed::Full=>matches!(packet_size,8|16|32|64),Speed::High=>packet_size==64,Speed::SuperSpeed|Speed::SuperSpeedPlus=>packet_size==512,_=>false};
++        if !valid {return Err(usb_if::err::USBError::InvalidParameter);}
          self.ctx.perper_change();
 -        // USB 设备描述符的 bMaxPacketSize0 字段（偏移 7）
 -        // 对于控制端点，这是直接的字节数值，不需要解码
@@ -214,12 +238,47 @@ index a7996fc..0a0a748 100644
 -        } else {
 -            desc.max_packet_size_0
 -        } as u16;
-+        let packet_size=decode_ep0_packet_size(self.port_speed,desc.max_packet_size_0)?;
- 
-         let dci = Dci::CTRL;
+-
+-        let dci = Dci::CTRL;
          self.ctx.with_input(|input| {
-@@ -183,6 +177,18 @@ impl Device {
+-            let _ = input.control_mut().add_context_flag(1); // Endpoint 0 Context
+-
+-            let endpoint = input.device_mut().endpoint_mut(dci.as_usize());
+-            endpoint.set_max_packet_size(packet_size);
++            input.control_mut().set_add_context_flag(1);
++            input.device_mut().endpoint_mut(Dci::CTRL.as_usize()).set_max_packet_size(packet_size);
+         });
+-
+         self.evaluate().await?;
+-
++        self.control_endpoint_mut().set_packet_size(packet_size);
+         Ok(())
      }
++    pub(crate) async fn explicit_descriptor(&mut self,kind:u8,index:u8,language:u16,length:u16)->Result<Vec<u8>> {
++        if length==0 {return Err(usb_if::err::USBError::InvalidParameter);}
++        let mut bytes=vec![0u8;length as usize];
++        let actual=self.control_endpoint_mut().get_descriptor(DescriptorType(kind),index,language,&mut bytes).await?;
++        if actual>bytes.len() {return Err(usb_if::err::USBError::InvalidParameter);}
++        bytes.truncate(actual);Ok(bytes)
++    }
++    pub(crate) async fn explicit_configuration(&mut self,value:u8)->Result<()> {
++        if !self.eps.is_empty() {return Err(usb_if::err::USBError::InvalidParameter);}
++        self.control_endpoint_mut().set_configuration(value).await?;
++        self.current_config_value=Some(value);Ok(())
++    }
++    pub(crate) async fn explicit_interface(&mut self,interface:u8,alternate:u8)->Result<()> {
++        if self.ep_interfaces.values().any(|number|*number==interface) {return Err(usb_if::err::USBError::InvalidParameter);}
++        self.control_endpoint_mut().control_out(ControlSetup {request_type:RequestType::Standard,recipient:Recipient::Interface,request:usb_if::transfer::Request::SetInterface,value:alternate as u16,index:interface as u16},&[]).await?;
++        Ok(())
++    }
++    pub(crate) async fn explicit_endpoints(&mut self,interface:u8,alternate:u8,bytes:&[u8])->Result<Vec<usb_if::endpoint::EndpointInfo>> {
++        let config=ConfigurationDescriptor::parse(bytes).ok_or(usb_if::err::USBError::InvalidParameter)?;
++        if Some(config.configuration_value)!=self.current_config_value || self.ep_interfaces.values().any(|number|*number==interface) {return Err(usb_if::err::USBError::InvalidParameter);}
++        self.config_desc.retain(|old|old.configuration_value!=config.configuration_value);
++        self.config_desc.push(config);
++        self.setup_interface_endpoints(interface,alternate).await?;
++        Ok(self.eps.values().map(|endpoint|endpoint.info()).collect())
++    }
  
      async fn address(&mut self, host: &mut Xhci, info: &DeviceAddressInfo) -> Result {
 +        self.address_with_options(host,info,false).await
@@ -237,7 +296,7 @@ index a7996fc..0a0a748 100644
          // 直接使用 DeviceSpeed 枚举计算默认 max packet size
          let max_packet_size = parse_default_max_packet_size_from_port_speed(info.port_speed);
  
-@@ -329,11 +335,7 @@ impl Device {
+@@ -329,11 +360,7 @@ impl Device {
          let input_bus_addr = self.ctx.input_bus_addr();
          trace!("Input context bus address: {input_bus_addr:#x?}");
          let result = host
@@ -250,7 +309,7 @@ index a7996fc..0a0a748 100644
              .await?;
  
          debug!("Address slot ok {result:x?}");
-@@ -348,12 +350,10 @@ impl Device {
+@@ -348,12 +375,10 @@ impl Device {
      async fn get_device_descriptor_base(&mut self) -> Result<DeviceDescriptorBase> {
          let mut data = vec![0u8; 8];
  
@@ -267,7 +326,7 @@ index a7996fc..0a0a748 100644
  
          Ok(desc)
      }
-@@ -528,7 +528,7 @@ impl Device {
+@@ -528,7 +553,7 @@ impl Device {
              input
                  .device_mut()
                  .slot_mut()
@@ -276,7 +335,7 @@ index a7996fc..0a0a748 100644
          });
          mb();
  
-@@ -765,3 +765,59 @@ impl DeviceOp for Device {
+@@ -765,3 +790,59 @@ impl DeviceOp for Device {
          self.update_hub_inner(params).boxed()
      }
  }
@@ -773,7 +832,7 @@ index fba5106..c3cef2f 100644
 +    }
 +}
 diff --git a/usb-host/src/backend/ty/ep/mod.rs b/usb-host/src/backend/ty/ep/mod.rs
-index a176905..949c067 100644
+index a176905..120617c 100644
 --- a/usb-host/src/backend/ty/ep/mod.rs
 +++ b/usb-host/src/backend/ty/ep/mod.rs
 @@ -17,7 +17,7 @@ use usb_if::{
@@ -785,6 +844,14 @@ index a176905..949c067 100644
  
  pub(crate) trait EndpointOp: Send + Any + 'static {
      fn submit_request(&mut self, request: TransferRequest) -> Result<RequestId, TransferError>;
+@@ -47,6 +47,7 @@ impl Endpoint {
+         }
+     }
+ 
++    pub(crate) fn set_packet_size(&mut self,size:u16) {self.info.max_packet_size=size;}
+     pub fn info(&self) -> EndpointInfo {
+         self.info
+     }
 diff --git a/usb-host/src/host.rs b/usb-host/src/host.rs
 index 63c6152..a73efd2 100644
 --- a/usb-host/src/host.rs
