@@ -304,19 +304,20 @@ index 27eeae2..12f8e2b 100644
 +
 +}
 diff --git a/usb-host/src/backend/kmod/xhci/mod.rs b/usb-host/src/backend/kmod/xhci/mod.rs
-index 8c82dc7..cd3c03d 100644
+index 8c82dc7..0a1169d 100644
 --- a/usb-host/src/backend/kmod/xhci/mod.rs
 +++ b/usb-host/src/backend/kmod/xhci/mod.rs
-@@ -22,7 +22,7 @@ fn parse_default_max_packet_size_from_port_speed(speed: Speed) -> u16 {
+@@ -22,11 +22,24 @@ fn parse_default_max_packet_size_from_port_speed(speed: Speed) -> u16 {
      // 根据 xHCI 规范表 6-30 和 U-Boot 实现：
      // 参考 U-Boot drivers/usb/host/xhci-mem.c:730-751
      match speed {
 -        Speed::Full => 64,             // Full Speed → 64 bytes
-+        Speed::Full => 8,             // Full Speed → 64 bytes
++        Speed::Full => 8,              // Full Speed initial EP0 default
          Speed::Low => 8,               // Low Speed → 8 bytes
          Speed::High => 64,             // High Speed → 64 bytes
          Speed::SuperSpeed => 512,      // SuperSpeed → 512 bytes
-@@ -30,3 +30,15 @@ fn parse_default_max_packet_size_from_port_speed(speed: Speed) -> u16 {
+-        Speed::SuperSpeedPlus => 1024, // SuperSpeedPlus → 1024 bytes
++        Speed::SuperSpeedPlus => 512, // SuperSpeedPlus EP0 → 512 bytes
          Speed::Wireless => unimplemented!("Wireless"),
      }
  }
@@ -330,6 +331,7 @@ index 8c82dc7..cd3c03d 100644
 +        assert_eq!(parse_default_max_packet_size_from_port_speed(Speed::Full),8);
 +        assert_eq!(parse_default_max_packet_size_from_port_speed(Speed::High),64);
 +        assert_eq!(parse_default_max_packet_size_from_port_speed(Speed::SuperSpeed),512);
++        assert_eq!(parse_default_max_packet_size_from_port_speed(Speed::SuperSpeedPlus),512);
 +    }
 +}
 diff --git a/usb-host/src/backend/kmod/xhci/reg.rs b/usb-host/src/backend/kmod/xhci/reg.rs
