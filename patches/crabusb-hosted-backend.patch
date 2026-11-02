@@ -84,6 +84,136 @@ index 71b939e..4ab690c 100644
 -        println!("raw: {:#x}", rs.0);
 -    }
 -}
+diff --git a/usb-host/src/backend/kmod/transfer.rs b/usb-host/src/backend/kmod/transfer.rs
+index 7efe34d..9354d97 100644
+--- a/usb-host/src/backend/kmod/transfer.rs
++++ b/usb-host/src/backend/kmod/transfer.rs
+@@ -25,9 +25,8 @@ impl Transfer {
+             Direction::Out => DmaDirection::ToDevice,
+         };
+         let mapping = if let Some((ptr, len)) = buff.filter(|(_, len)| *len > 0) {
+-            let slice = unsafe { core::slice::from_raw_parts_mut(ptr.as_ptr(), len) };
+             Some(
+-                dma.map_single_array(slice, ALIGN, dma_direction)
++                unsafe { dma.map_single_raw(ptr, len, ALIGN, dma_direction) }
+                     .map_err(|err| TransferError::Other(anyhow!("DMA mapping failed: {err}")))?,
+             )
+         } else {
+diff --git a/usb-host/src/backend/kmod/xhci/event.rs b/usb-host/src/backend/kmod/xhci/event.rs
+index 27eeae2..12f8e2b 100644
+--- a/usb-host/src/backend/kmod/xhci/event.rs
++++ b/usb-host/src/backend/kmod/xhci/event.rs
+@@ -60,7 +60,7 @@ impl EventRing {
+     }
+ 
+     pub fn next(&mut self) -> Option<Allowed> {
+-        let data = self.current_data();
++        let data = self.current_data()?;
+ 
+         let allowed = Allowed::try_from(data.to_raw()).ok()?;
+ 
+@@ -73,11 +73,7 @@ impl EventRing {
+     }
+ 
+     pub fn has_pending_event(&mut self) -> bool {
+-        let data = self.current_data();
+-        let Ok(allowed) = Allowed::try_from(data.to_raw()) else {
+-            return false;
+-        };
+-        self.cycle == allowed.cycle_bit()
++        self.current_data().is_some()
+     }
+ 
+     pub fn erdp(&self) -> u64 {
+@@ -112,11 +108,22 @@ impl EventRing {
+         &self.segments[self.segment_index]
+     }
+ 
+-    fn current_data(&self) -> super::ring::TrbData {
+-        self.current_segment()
+-            .trbs
+-            .read(self.trb_index)
+-            .expect("event ring TRB index out of bounds")
++    // x86_64 coherent DMA: acquire ownership before loading event payload.
++    // No reference is formed to the mapped bytes; the controller publishes the
++    // cycle bit in dword 3 after the payload. The ring is single-consumer.
++    fn current_data(&self) -> Option<super::ring::TrbData> {
++        let ring = &self.current_segment().trbs;
++        let offset = self.trb_index * 16;
++        ring.prepare_read(offset + 12, 4);
++        let base = unsafe {ring.as_ptr().as_ptr().cast::<u32>().add(self.trb_index * 4)};
++        let control = unsafe {base.add(3).read_volatile()};
++        if (control & 1 != 0) != self.cycle { return None; }
++        mb();
++        ring.prepare_read(offset, 12);
++        let mut words = [0u32; 4];
++        for word in 0..3 { words[word] = unsafe {base.add(word).read_volatile()}; }
++        words[3] = control;
++        Some(super::ring::TrbData(words))
+     }
+ 
+     fn inc_deque(&mut self) {
+@@ -137,3 +144,60 @@ pub struct EventRingInfo {
+     pub erdp: u64,
+     pub erstba: u64,
+ }
++
++#[cfg(all(test, feature = "hosted-direct"))]
++mod access_tests {
++    use super::*;
++    use crate::osal::{DmaAddr,DmaHandle,DmaMapHandle,DmaError,DmaOp,KernelOp};
++    use core::{alloc::Layout, num::NonZeroUsize, ptr::NonNull, time::Duration};
++    struct Memory;
++    impl DmaOp for Memory {
++        fn page_size(&self)->usize {4096}
++        unsafe fn alloc_coherent(&self,_:u64,layout:Layout)->Option<DmaHandle> {
++            let ptr=NonNull::new(unsafe {std::alloc::alloc_zeroed(layout)})?;
++            Some(unsafe {DmaHandle::new(ptr,DmaAddr::from(ptr.as_ptr() as u64),layout)})
++        }
++        unsafe fn dealloc_coherent(&self,h:DmaHandle) {
++            unsafe {std::alloc::dealloc(h.as_ptr().as_ptr(),h.layout());}
++        }
++        unsafe fn map_single(&self,_:u64,_:NonNull<u8>,_:NonZeroUsize,_:usize,_:DmaDirection)->core::result::Result<DmaMapHandle,DmaError> {unreachable!()}
++        unsafe fn unmap_single(&self,_:DmaMapHandle) {unreachable!()}
++    }
++    impl KernelOp for Memory {fn delay(&self,_:Duration) {}}
++    static MEMORY:Memory=Memory;
++    #[test]
++    fn event_cycle_is_checked_before_consumption_and_wraps() {
++        let kernel=Kernel::new(u64::MAX,&MEMORY);
++        let mut ring=EventRing::new(2,&kernel).unwrap();
++        // Zeroed entries have an unpublished cycle; no dequeue advance.
++        assert!(ring.next().is_none());
++        assert_eq!((ring.segment_index,ring.trb_index,ring.cycle),(0,0,true));
++        for segment in &mut ring.segments {
++            for index in 0..TRBS_PER_SEGMENT {
++                // Command Completion TRB: type 33, Success completion, cycle one.
++                segment.trbs.set(index,super::super::ring::TrbData([0,0,1<<24,(33<<10)|1]));
++            }
++        }
++        for _ in 0..TRBS_PER_SEGMENT*2 {assert!(ring.next().is_some());}
++        assert_eq!((ring.segment_index,ring.trb_index,ring.cycle),(0,0,false));
++        assert!(ring.next().is_none()); // stale entries from previous cycle
++        ring.segments[0].trbs.set(0,super::super::ring::TrbData([0,0,1<<24,33<<10]));
++        assert!(ring.next().is_some());
++        assert!(ring.next().is_none());
++    }
++    #[test]
++    fn producer_cycle_and_link_wrap_follow_free_slot_ownership() {
++        let kernel=Kernel::new(u64::MAX,&MEMORY);
++        let mut ring=Ring::new_segment(true,DmaDirection::ToDevice,&kernel).unwrap();
++        for _ in 0..TRBS_PER_SEGMENT-1 {
++            ring.enque_command(xhci::ring::trb::command::Noop::new().into());
++        }
++        assert!(!ring.cycle);
++        assert_eq!(ring.i,0);
++        let link=ring.trbs.read(TRBS_PER_SEGMENT-1).unwrap().to_raw();
++        assert_eq!(link[3]&1,1);
++        ring.enque_command(xhci::ring::trb::command::Noop::new().into());
++        assert_eq!(ring.trbs.read(0).unwrap().to_raw()[3]&1,0);
++    }
++
++}
 diff --git a/usb-host/src/backend/kmod/xhci/reg.rs b/usb-host/src/backend/kmod/xhci/reg.rs
 index 9eb9bc8..e3a49d0 100644
 --- a/usb-host/src/backend/kmod/xhci/reg.rs
@@ -109,6 +239,55 @@ index 9eb9bc8..e3a49d0 100644
  impl Drop for DisableIrqGuard {
      fn drop(&mut self) {
          if self.enable {
+diff --git a/usb-host/src/backend/kmod/xhci/ring.rs b/usb-host/src/backend/kmod/xhci/ring.rs
+index 4c44966..e1469a8 100644
+--- a/usb-host/src/backend/kmod/xhci/ring.rs
++++ b/usb-host/src/backend/kmod/xhci/ring.rs
+@@ -18,7 +18,7 @@ const DEFAULT_RING_PAGES: usize = 2;
+ 
+ #[derive(Clone)]
+ #[repr(transparent)]
+-pub struct TrbData([u32; TRB_LEN]);
++pub struct TrbData(pub(crate) [u32; TRB_LEN]);
+ 
+ impl TrbData {
+     pub fn to_raw(&self) -> [u32; TRB_LEN] {
+@@ -134,11 +134,24 @@ impl Ring {
+     }
+ 
+     fn set_transfer_trb(&mut self, index: usize, trb: transfer::Allowed) {
+-        self.trbs.set(index, trb.into());
++        self.write_trb(index, trb.into());
++    }
++
++    /// Publish a TRB with the ownership dword last. Caller owns this free slot;
++    /// ring-space accounting must prevent overwriting a controller-owned entry.
++    fn write_trb(&mut self, index: usize, trb: TrbData) {
++        assert!(index < self.trbs.len());
++        let base = unsafe { self.trbs.as_ptr().as_ptr().cast::<u32>().add(index * 4) };
++        unsafe {
++            for word in 0..3 { base.add(word).write_volatile(trb.0[word]); }
++            mb();
++            base.add(3).write_volatile(trb.0[3]);
++        }
++        self.trbs.confirm_write(index * TRB_SIZE, TRB_SIZE);
+     }
+ 
+     pub fn enque_trb(&mut self, trb: TrbData) -> BusAddr {
+-        self.trbs.set(self.i, trb);
++        self.write_trb(self.i, trb);
+         let addr = self.trb_bus_addr(self.i);
+         self.next_index();
+         addr
+@@ -164,7 +177,7 @@ impl Ring {
+             }
+             let trb = command::Allowed::Link(link);
+ 
+-            self.trbs.set(len - 1, trb.into());
++            self.write_trb(len - 1, trb.into());
+ 
+             self.cycle = !self.cycle;
+         } else if self.i >= len {
 diff --git a/usb-host/src/backend/kmod/xhci/sync.rs b/usb-host/src/backend/kmod/xhci/sync.rs
 index 8052e81..80e3c81 100644
 --- a/usb-host/src/backend/kmod/xhci/sync.rs

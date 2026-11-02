@@ -1,3 +1,9 @@
+#[cfg(all(
+    feature = "hosted-direct",
+    not(all(target_os = "linux", target_arch = "x86_64"))
+))]
+compile_error!("hosted-direct is reviewed only for coherent Linux x86_64 DMA");
+
 #[path = "../lib/app.rs"]
 pub mod app;
 #[path = "../lib/core/mod.rs"]

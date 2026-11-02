@@ -39,3 +39,40 @@ if git('diff', '--binary', 'HEAD', capture=True).stdout != PATCH.read_text():
 if git('ls-files', '--others', '--exclude-standard', capture=True).stdout.strip():
     raise SystemExit('Unexpected untracked dependency files.')
 print('Pinned CrabUSB hosted backend is ready:',REV)
+# Maintained dma-api source is unpacked only from the checksum-pinned registry archive.
+import io
+import json
+import shutil
+import tarfile
+import tempfile
+import urllib.request
+DMA_SHA = '6ce802d0c429c6966bea151e8e78eb5906d5b5e2cdebd0e960097cbe3654a3db'
+DMA_DEST = ROOT / '.fah-cache' / 'dma-api'
+DMA_STAMP = ROOT / '.fah-cache' / 'dma-api-tree.json'
+DMA_PATCH = ROOT / 'patches' / 'dma-api-vfio.patch'
+def tree(directory):
+    return {str(p.relative_to(directory)): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in directory.rglob('*') if p.is_file()}
+archive = ROOT / '.fah-cache' / 'dma-api-0.7.3.crate'
+if not archive.exists():
+    with urllib.request.urlopen('https://static.crates.io/crates/dma-api/dma-api-0.7.3.crate', timeout=60) as response:
+        payload = response.read()
+    if hashlib.sha256(payload).hexdigest() != DMA_SHA:
+        raise SystemExit('DMA archive checksum mismatch')
+    archive.write_bytes(payload)
+payload = archive.read_bytes()
+if hashlib.sha256(payload).hexdigest() != DMA_SHA:
+    raise SystemExit('Cached DMA archive checksum mismatch')
+with tempfile.TemporaryDirectory(dir=ROOT / '.fah-cache') as temporary:
+    with tarfile.open(fileobj=io.BytesIO(payload)) as package:
+        package.extractall(temporary, filter='data')
+    expected = pathlib.Path(temporary) / 'dma-api-0.7.3'
+    subprocess.run(['git', 'apply', '--unsafe-paths', '--directory', str(expected), str(DMA_PATCH)], check=True)
+    expected_tree = tree(expected)
+    if DMA_DEST.exists() and tree(DMA_DEST) != expected_tree:
+        if not DMA_STAMP.exists() or tree(DMA_DEST) != json.loads(DMA_STAMP.read_text()):
+            raise SystemExit('Unexpected changes in cached dma-api source')
+        shutil.rmtree(DMA_DEST)
+    if not DMA_DEST.exists(): shutil.copytree(expected, DMA_DEST)
+    DMA_STAMP.write_text(json.dumps(expected_tree, sort_keys=True))
+print('Pinned dma-api VFIO access patch is ready:', DMA_SHA)
