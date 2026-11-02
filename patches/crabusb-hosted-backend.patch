@@ -96,10 +96,10 @@ index 71b939e..4ab690c 100644
 -    }
 -}
 diff --git a/usb-host/src/backend/kmod/mod.rs b/usb-host/src/backend/kmod/mod.rs
-index e17466d..efe5a86 100644
+index e17466d..00ea254 100644
 --- a/usb-host/src/backend/kmod/mod.rs
 +++ b/usb-host/src/backend/kmod/mod.rs
-@@ -50,3 +50,80 @@ pub struct DeviceAddressInfo {
+@@ -50,3 +50,84 @@ pub struct DeviceAddressInfo {
      pub port_id: u8,
      pub infos: BTreeMap<Id<Hub>, HubInfo>,
  }
@@ -156,6 +156,10 @@ index e17466d..efe5a86 100644
 +        if raw&1==0 || raw&(1<<9)==0 {return Err(USBError::InvalidParameter);}
 +        if warm && ((raw>>10)&15)<4 {return Err(USBError::NotSupported);}
 +        self.write_port(port,port_writable_state(raw)|if warm {1<<31}else{1<<4});
++        let mut yielded=false;
++        core::future::poll_fn(|cx| {
++            if yielded {core::task::Poll::Ready(())} else {yielded=true;cx.waker().wake_by_ref();core::task::Poll::Pending}
++        }).await;
 +        loop {
 +            let raw=self.port_status(port)?;
 +            if raw&1==0 {return Err(USBError::NotFound);}
