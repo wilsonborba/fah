@@ -227,7 +227,10 @@ mod integration {
         fn confirm_write(&self, h: &DmaMapHandle, offset: usize, size: usize, d: DmaDirection) {
             assert!(offset <= h.size() && size <= h.size() - offset);
             if matches!(d, DmaDirection::ToDevice | DmaDirection::Bidirectional) {
-                let bounce = h.alloc_virt().expect("owned bounce allocation");
+                let Some(bounce) = h.alloc_virt() else {
+                    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+                    return; // Coherent allocation: CPU address already names shared storage.
+                };
                 for i in offset..offset + size {
                     unsafe {
                         bounce
@@ -243,7 +246,10 @@ mod integration {
             assert!(offset <= h.size() && size <= h.size() - offset);
             if matches!(d, DmaDirection::FromDevice | DmaDirection::Bidirectional) {
                 std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
-                let bounce = h.alloc_virt().expect("owned bounce allocation");
+                let Some(bounce) = h.alloc_virt() else {
+                    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+                    return; // Coherent allocation: CPU address already names shared storage.
+                };
                 for i in offset..offset + size {
                     unsafe {
                         h.as_ptr()
