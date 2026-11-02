@@ -29,6 +29,8 @@ pub struct LocalController {
     host: Option<crab_usb::ExplicitHost>,
     binding: Option<Arc<InterruptBinding>>,
     pump: Option<Pump>,
+    pending: std::collections::BTreeMap<u64, PendingRequest>,
+    next_request: u64,
 }
 impl LocalController {
     pub fn new(run_id: String) -> Self {
@@ -42,6 +44,8 @@ impl LocalController {
             host: None,
             binding: None,
             pump: None,
+            pending: std::collections::BTreeMap::new(),
+            next_request: 1,
         }
     }
     pub fn port_count(&self) -> Result<u8, OperationError> {
@@ -280,6 +284,7 @@ pub fn block_until<F: Future>(future: F, timeout: Duration) -> Result<F::Output,
 impl Drop for LocalController {
     fn drop(&mut self) {
         if self.resources.is_some() {
+            std::mem::forget(std::mem::take(&mut self.pending));
             // An owner dropped without confirmed close. Preserve the entire hardware
             // lifetime graph; process exit's kernel cleanup is separate evidence.
             if let Some(value) = self.pump.take() {
@@ -455,5 +460,243 @@ impl crate::domain::services::usb::ConfigurationBackend for LocalController {
                 interval: info.interval,
             })
             .collect())
+    }
+}
+
+use crate::domain::models::requests::{
+    BackendCompletion, Direction, OwnedRequest, RequestMetadata, TransferType,
+};
+struct PendingRequest {
+    metadata: RequestMetadata,
+    buffer: Vec<u8>,
+    raw_id: crab_usb::usb_if::endpoint::RequestId,
+    lease: Option<super::iova::Lease>,
+    terminal_error: Option<OperationError>,
+}
+impl LocalController {
+    fn check_event_pump(&self) -> Result<(), OperationError> {
+        let pump = self
+            .pump
+            .as_ref()
+            .ok_or_else(|| OperationError::validation("event pump unavailable"))?;
+        for notice in pump.notices.try_iter() {
+            match notice {
+                super::events::PumpNotice::Drained => {}
+                other => {
+                    return Err(recovery_error(
+                        format!("event source failed: {other:?}"),
+                        None,
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+fn recovery_error(message: String, code: Option<u32>) -> OperationError {
+    OperationError {
+        category: ErrorCategory::RecoveryRequired,
+        message,
+        os_code: None,
+        completion_code: code,
+    }
+}
+impl crate::domain::services::requests::RequestBackend for LocalController {
+    fn submit_request(&mut self, request: OwnedRequest) -> Result<u64, OperationError> {
+        self.check_event_pump()?;
+        let token = self.next_request;
+        let next = token
+            .checked_add(1)
+            .ok_or_else(|| OperationError::validation("backend request identity exhausted"))?;
+        let OwnedRequest {
+            metadata,
+            mut buffer,
+        } = request;
+        let direction = match metadata.direction {
+            Direction::In => crab_usb::usb_if::transfer::Direction::In,
+            Direction::Out => crab_usb::usb_if::transfer::Direction::Out,
+        };
+        let transfer_buffer = if metadata.direction == Direction::In {
+            crab_usb::usb_if::endpoint::TransferBuffer::from_mut_slice(&mut buffer)
+        } else {
+            crab_usb::usb_if::endpoint::TransferBuffer::from_slice(&buffer)
+        };
+        use crab_usb::usb_if::{
+            endpoint::TransferRequest,
+            host::ControlSetup,
+            transfer::{Recipient, Request, RequestType},
+        };
+        let raw = match metadata.transfer_type {
+            TransferType::Control => {
+                let setup = metadata
+                    .setup
+                    .ok_or_else(|| OperationError::validation("SETUP missing"))?;
+                let request_type = match (setup.request_type >> 5) & 3 {
+                    0 => RequestType::Standard,
+                    1 => RequestType::Class,
+                    2 => RequestType::Vendor,
+                    _ => return Err(OperationError::validation("reserved request type")),
+                };
+                let recipient = match setup.request_type & 31 {
+                    0 => Recipient::Device,
+                    1 => Recipient::Interface,
+                    2 => Recipient::Endpoint,
+                    3 => Recipient::Other,
+                    _ => return Err(OperationError::validation("reserved recipient")),
+                };
+                TransferRequest::Control {
+                    setup: ControlSetup {
+                        request_type,
+                        recipient,
+                        request: Request::from(setup.request),
+                        value: setup.value,
+                        index: setup.index,
+                    },
+                    direction,
+                    buffer: transfer_buffer,
+                }
+            }
+            TransferType::Bulk => TransferRequest::Bulk {
+                direction,
+                buffer: transfer_buffer,
+            },
+            TransferType::Interrupt => TransferRequest::Interrupt {
+                direction,
+                buffer: transfer_buffer,
+            },
+        };
+        let adapter = self
+            .adapter
+            .ok_or_else(|| OperationError::validation("DMA adapter unavailable"))?;
+        let epoch = adapter.allocation_epoch();
+        let host = self
+            .host
+            .as_mut()
+            .ok_or_else(|| OperationError::validation("controller unavailable"))?;
+        let raw_id = match host.submit_request(metadata.device.slot, metadata.endpoint, raw) {
+            Ok(id) => id,
+            Err(error) => {
+                // For the validated control/bulk/interrupt profile all fallible submission
+                // checks precede TRB publication. Any dropped fresh map is unpublished.
+                for lease in adapter.retired_streaming_since(epoch) {
+                    unsafe { adapter.reclaim_lease_after_quiescence(lease) }
+                        .map_err(|message| recovery_error(message, None))?;
+                }
+                return Err(usb_error(error));
+            }
+        };
+        // Once published, metadata failures must return a retained accepted token.
+        let (lease, terminal_error) =
+            match host.request_dma_address(metadata.device.slot, metadata.endpoint, raw_id) {
+                Ok(Some(iova)) => match adapter.mapping_lease(iova) {
+                    Some(lease) => (Some(lease), None),
+                    None => (
+                        None,
+                        Some(recovery_error(
+                            "published request has no DMA lease".into(),
+                            None,
+                        )),
+                    ),
+                },
+                Ok(None) if metadata.requested_length == 0 => (None, None),
+                _ => (
+                    None,
+                    Some(recovery_error(
+                        "cannot identify published request mapping".into(),
+                        None,
+                    )),
+                ),
+            };
+        self.pending.insert(
+            token,
+            PendingRequest {
+                metadata,
+                buffer,
+                raw_id,
+                lease,
+                terminal_error,
+            },
+        );
+        self.next_request = next;
+        Ok(token)
+    }
+    fn poll_request(&mut self, token: u64) -> Result<Option<BackendCompletion>, OperationError> {
+        self.check_event_pump()?;
+        let pending = self
+            .pending
+            .get_mut(&token)
+            .ok_or_else(|| OperationError::validation("unknown backend request"))?;
+        if let Some(error) = pending.terminal_error.clone() {
+            return Ok(Some(BackendCompletion {
+                actual_length: None,
+                completion_code: error.completion_code,
+                data: None,
+                error: Some(error),
+                quiescent: false,
+            }));
+        }
+        let host = self
+            .host
+            .as_mut()
+            .ok_or_else(|| OperationError::validation("controller unavailable"))?;
+        let Some(observed) = host
+            .reclaim_request(
+                pending.metadata.device.slot,
+                pending.metadata.endpoint,
+                pending.raw_id,
+            )
+            .map_err(usb_error)?
+        else {
+            return Ok(None);
+        };
+        let code = observed.completion_code;
+        let actual = match observed.result {
+            Ok(result)
+                if result.actual_length <= pending.buffer.len()
+                    && code.is_some_and(|code| matches!(code, 1 | 13)) =>
+            {
+                result.actual_length
+            }
+            result => {
+                let error = recovery_error(
+                    format!("request completion requires recovery: {result:?}"),
+                    code,
+                );
+                pending.terminal_error = Some(error.clone());
+                return Ok(Some(BackendCompletion {
+                    actual_length: None,
+                    completion_code: code,
+                    data: None,
+                    error: Some(error),
+                    quiescent: false,
+                }));
+            }
+        };
+        if let Some(lease) = pending.lease {
+            // SAFETY: real successful TD completion consumed by the sole backend owner;
+            // mapping handle is dropped and no hardware may use this request's buffer.
+            if let Err(message) =
+                unsafe { self.adapter.unwrap().reclaim_lease_after_quiescence(lease) }
+            {
+                let error = recovery_error(message, code);
+                pending.terminal_error = Some(error.clone());
+                return Ok(Some(BackendCompletion {
+                    actual_length: Some(actual),
+                    completion_code: code,
+                    data: None,
+                    error: Some(error),
+                    quiescent: false,
+                }));
+            }
+        }
+        let mut pending = self.pending.remove(&token).unwrap();
+        pending.buffer.truncate(actual);
+        Ok(Some(BackendCompletion {
+            actual_length: Some(actual),
+            completion_code: code,
+            data: Some(pending.buffer),
+            error: None,
+            quiescent: true,
+        }))
     }
 }
