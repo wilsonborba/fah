@@ -27,6 +27,39 @@ index f8cc9f1..7cd405e 100644
          println!("cargo::rustc-cfg=kmod");
      } else if std::env::var("CARGO_FEATURE_LIBUSB").is_ok() {
          println!("cargo::rustc-cfg=umod");
+diff --git a/usb-host/src/backend/kmod/dwc/grf.rs b/usb-host/src/backend/kmod/dwc/grf.rs
+index 4c6eccf..85dcbcc 100644
+--- a/usb-host/src/backend/kmod/dwc/grf.rs
++++ b/usb-host/src/backend/kmod/dwc/grf.rs
+@@ -506,22 +506,22 @@ mod tests {
+         // 测试 USB3OTG_CFG 位字段
+         let value =
+             USB3OTG_CFG::PIPE_ENABLE::Enable.value + USB3OTG_CFG::U3_PORT_DISABLE::Disable.value;
+-        assert_eq!(value, (1 << 15) | (0 << 8));
++        assert_eq!(value, (1 << 15) | (1 << 8));
+     }
+ 
+     #[test]
+     fn test_enable_u3_port_value() {
+-        // 0x0188 = bit 15 = 1, bit 8 = 0
+-        let expected: u32 = 0x0188;
++        // Enabling U3 clears its disable bit; PIPE_ENABLE is bit 15.
++        let expected: u32 = 0x8000;
+         let value =
+-            USB3OTG_CFG::PIPE_ENABLE::Enable.value + USB3OTG_CFG::U3_PORT_DISABLE::Disable.value;
++            USB3OTG_CFG::PIPE_ENABLE::Enable.value + USB3OTG_CFG::U3_PORT_DISABLE::Enable.value;
+         assert_eq!(value, expected);
+     }
+ 
+     #[test]
+     fn test_disable_u3_port_value() {
+-        // 0x1100 = bit 15 = 1, bit 12 = 1
+-        let expected: u32 = 0x1100;
++        // 0x9000 = bit 15 = 1, bit 12 = 1
++        let expected: u32 = 0x9000;
+         let value =
+             USB3OTG_CFG::PIPE_ENABLE::Enable.value + USB3OTG_CFG::PHY_DISABLE::Disable.value;
+         assert_eq!(value, expected);
 diff --git a/usb-host/src/backend/kmod/hub/mod.rs b/usb-host/src/backend/kmod/hub/mod.rs
 index 71b939e..4ab690c 100644
 --- a/usb-host/src/backend/kmod/hub/mod.rs
