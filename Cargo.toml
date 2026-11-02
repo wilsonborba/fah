@@ -1,0 +1,25 @@
+[package]
+name = "fah"
+version = "0.1.0-dev"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+description = "Explicit USB host-controller research CLI"
+repository = "https://github.com/wilsonborba/fah"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "fah"
+path = "src/main.rs"
+
+[features]
+default = []
+hosted-direct = ["dep:crab-usb", "dep:vfio-ioctls", "crab-usb/hosted-direct"]
+
+[dependencies]
+crab-usb = { path = ".fah-cache/CrabUSB/usb-host", optional = true, default-features = false }
+vfio-ioctls = { git = "https://github.com/rust-vmm/vfio", rev = "93bcf25f3f8196314a71173ae96749b269a65b19", optional = true, default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

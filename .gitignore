@@ -15,3 +15,6 @@ docs/
 # OS metadata
 .DS_Store
 Thumbs.db
+
+# Pinned dependency source cache; rebuilt by scripts/prepare-dependencies.py
+.fah-cache/

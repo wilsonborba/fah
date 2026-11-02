@@ -12,23 +12,37 @@
 
 ## 1. Overview
 
-Low-level hardware research, bootROM diagnostics, and custom exploit delivery (such as `checkm8` for legacy Apple silicon) often require dedicated microcontrollers like a Raspberry Pi Pico or an Arduino with a USB Host Shield. 
+**FAH** is a research project for a Rust userspace USB host-controller driver on Linux. It studies how much USB control an existing Intel xHCI controller can provide through VFIO.
 
-This requirement exists because standard desktop operating systems (Linux, macOS, Windows) manage USB controllers through default kernel drivers (`xhci_hcd`). Operating system drivers automatically send device discovery packets, assign bus addresses, and initiate standard enumeration sequences. These automatic requests break fragile hardware states during low-level recovery procedures.
+Linux normally manages these controllers through `xhci_hcd` and the USB core. This stack discovers devices and sends initialization requests. Some experiments require different request sequences or incomplete transfers.
 
-**FAH** is an open-source userspace driver written in Rust. It unbinds a physical Intel xHCI host controller from the Linux kernel and takes exclusive hardware ownership using Linux VFIO (`vfio-pci`). 
+The proposed design gives FAH exclusive access to a physical controller through `vfio-pci`. FAH would manage its registers, DMA memory, interrupts, and transfer queues. The existing controller hardware remains unchanged.
 
-By controlling the physical xHCI controller directly from userspace, FAH provides the same low-level USB packet control as an external microcontroller: directly from an Intel PC, without extra hardware.
+The research asks which operations can match a Raspberry Pi Pico USB host implementation. Equivalent connectors do not establish equivalent controller capabilities. Arbitrary packet generation, precise timing, and full Pico equivalence remain unverified.
+
+### iPad mini 1: a case study
+
+The Apple A5 iPad mini 1 is a study case, not the project's sole purpose. Its `checkm8-a5` boot process provides concrete USB requirements to compare with Intel xHCI capabilities. Project Cascadia provides the context for exploring native Linux on this device.
+
+FAH also targets broader USB protocol research and controller diagnostics. Successful iPad exploitation or Linux boot is not an established project capability. Matching one case study would not prove full Pico equivalence.
+
+### Current status
+
+The Rust application foundation is implemented. Help, version, argument validation, and non-hardware CI are available. The USB driver is not implemented yet.
+
+Prepare pinned sources with `python3 scripts/prepare-dependencies.py`. Then build and check with `cargo check --locked`, `cargo test --locked`, and `cargo run -- --help`. Hardware operations are not available in this foundation.
 
 ---
 
 ## 2. Key Objectives
 
-* **Pico Equivalence**: Provide microsecond transaction control, raw packet crafting, and custom setup packet sequencing directly on Intel PC hardware.
-* **Exclusive Controller Ownership**: Disconnect Linux kernel drivers from the target controller to prevent automatic enumeration and unwanted zero-length packets.
-* **Direct Register Access**: Memory-map xHCI operational and runtime registers directly into userspace memory via VFIO BAR regions.
-* **IOMMU DMA Allocator**: Allocate physical DMA buffers and manage command/transfer rings with hardware safety through the IOMMU.
-* **Pure Rust Implementation**: Build a safe, maintainable driver leveraging modern Rust systems programming.
+* **Capability Mapping**: Compare Pico operations with documented xHCI features. Separate hardware support, driver restrictions, and unverified behavior.
+* **Exclusive Controller Ownership**: Study controller handoff from `xhci_hcd` to `vfio-pci`. Prevent Linux's normal USB enumeration on the selected controller.
+* **Direct Register Access**: Map the controller's PCI BAR regions into userspace through VFIO.
+* **IOMMU DMA Allocator**: Allocate buffers and map device-visible addresses through VFIO. Manage buffer alignment, access, and lifetime.
+* **Interrupt Handling**: Connect supported interrupt modes to Linux `eventfd`. Check MSI-X, MSI, and INTx capabilities on the target controller.
+* **Transaction Experiments**: Investigate custom SETUP sequences, incomplete transfers, and controlled resets. Measure timing instead of assuming microsecond guarantees.
+* **Rust Implementation**: Reuse existing libraries where suitable. Keep unsafe hardware access explicit and document its requirements.
 
 ---
 
@@ -47,7 +61,7 @@ FAH separates low-level hardware interaction from user command parsing:
 
 * **Hardware**: Intel PC with VT-d / IOMMU enabled in BIOS/UEFI.
 * **Operating System**: Linux kernel with VFIO support enabled (`vfio`, `vfio_iommu_type1`, `vfio_pci`).
-* **Toolchain**: Rust 1.80+ (`cargo`, `rustc`).
+* **Toolchain**: Rust (`cargo`, `rustc`). The minimum version depends on the selected dependencies and remains to be established.
 
 ---
 
