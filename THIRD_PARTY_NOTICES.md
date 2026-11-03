@@ -4,7 +4,8 @@ Generated from the locked Linux x86_64 hosted normal/build dependency graph.
 Build-time dependencies are included conservatively; this is a source/notice inventory,
 not a claim that every listed package is linked into the executable.
 
-Original declared license expressions and published text filenames are preserved.
+Declared license expressions and published text contents are preserved.
+Reviewed fallback filenames identify their source package/provenance.
 Full texts are bundled under `licenses/<name>-<version>/` in the candidate.
 Reviewed fallbacks for incomplete archives live in `assets/licenses/fallbacks.json`;
 the trait-ffi supplied standard text is explicitly identified as such.

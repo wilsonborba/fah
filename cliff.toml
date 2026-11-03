@@ -1,0 +1,36 @@
+# Release notes generated with git-cliff2.10.1 from Conventional Commits.
+[changelog]
+header = "# Changelog\n\n"
+body = """
+{% if version %}\
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## [Unreleased]
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}\
+{% set changes = commits | filter(attribute="merge_commit", value=false) %}\
+{% if changes | length > 0 %}
+### {{ group | striptags | trim }}
+{% for commit in changes %}\
+- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}{{ commit.message | upper_first }} ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/wilsonborba/fah/commit/{{ commit.id }}))
+{% endfor %}\
+{% endif %}\
+{% endfor %}
+"""
+trim = true
+[git]
+conventional_commits = true
+filter_unconventional = true
+split_commits = false
+protect_breaking_commits = true
+commit_parsers = [
+  { message = "^feat", group = "<!--0-->Features" },
+  { message = "^fix", group = "<!--1-->Fixes" },
+  { message = "^refactor", group = "<!--2-->Refactoring" },
+  { message = "^docs", group = "<!--3-->Documentation" },
+  { message = "^test", group = "<!--4-->Validation" },
+  { message = "^chore|^ci", group = "<!--5-->Maintenance" },
+  { message = "^merge", skip = true },
+]
+filter_commits = true
+sort_commits = "oldest"

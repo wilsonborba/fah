@@ -98,7 +98,8 @@ def notices(records):
     lines = ['# Third-party notices', '', 'Generated from the locked Linux x86_64 hosted normal/build dependency graph.',
              'Build-time dependencies are included conservatively; this is a source/notice inventory,',
              'not a claim that every listed package is linked into the executable.', '',
-             'Original declared license expressions and published text filenames are preserved.',
+             'Declared license expressions and published text contents are preserved.',
+             'Reviewed fallback filenames identify their source package/provenance.',
              'Full texts are bundled under `licenses/<name>-<version>/` in the candidate.',
              'Reviewed fallbacks for incomplete archives live in `assets/licenses/fallbacks.json`;',
              'the trait-ffi supplied standard text is explicitly identified as such.', '',
@@ -110,6 +111,10 @@ def notices(records):
         repository = record['repository'] or f'https://crates.io/crates/{record["name"]}/{record["version"]}'
         lines.append(f'| [{record["name"]} {record["version"]}]({repository}) | {record["license"]} | {texts} |')
     return '\n'.join(lines) + '\n'
+
+
+TRACE_PHASES={'passive','chosen_reset','slot','bsr','descriptor_at_default','assigned_address','compatibility_plan','negative_capabilities','noop','equivalent_explicit','equivalent_convenience'}
+FAULT_CASES={'timeout_logical_cancel_late_completion','endpoint_abort_restart','uncertain_stop','close_pending','eof_pending','sigint_wait_then_shutdown','sigterm_pending','endpoint_reset_state','endpoint_reset_preserve','guest_process_death','disconnect_pending'}
 
 
 def verified_runs(paths, commit, binary_hash):
@@ -126,11 +131,11 @@ def verified_runs(paths, commit, binary_hash):
             raise ValueError('binary changed since VM validation; rebuild image and repeat required suites')
         if result['suite'] == 'explicit':
             validation = json.loads((path / 'trace-validation.json').read_text())
-            if len(validation) != 11 or not all(row['verified'] for row in validation):
+            if len(validation) != 11 or {row.get('phase')for row in validation}!=TRACE_PHASES or not all(row['verified'] for row in validation):
                 raise ValueError('independent trace windows incomplete')
         if result['suite'] == 'faults':
             matrix = json.loads((path / 'failure-matrix.json').read_text())
-            if len(matrix) != 11 or not all(row['verified'] for row in matrix):
+            if len(matrix) != 11 or {row.get('name')for row in matrix}!=FAULT_CASES or not all(row['verified'] for row in matrix):
                 raise ValueError('guest failure matrix incomplete')
         runs.append(dict(id=path.name, suite=result['suite'], commit=commit, binary_sha256=binary_hash, _path=path))
     suites = [run['suite'] for run in runs]
