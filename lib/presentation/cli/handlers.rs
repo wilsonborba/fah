@@ -103,6 +103,9 @@ impl<B: ExplicitBackend> Handler<B> {
         }
         frames
     }
+    pub fn has_waits(&self) -> bool {
+        !self.waits.is_empty()
+    }
     pub fn cancel_waits(&mut self, reason: &str) -> Vec<Frame> {
         let waits = std::mem::take(&mut self.waits);
         waits.into_iter().map(|(operation,(id,_))|{let mut frame=Frame::response(operation,self.usb.session.state(),Ok(json!({"request_id":id,"wait_cancelled":true,"reason":reason,"usb_aborted":false})));frame.kind="event";frame}).collect()

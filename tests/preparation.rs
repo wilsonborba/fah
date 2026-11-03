@@ -949,3 +949,124 @@ fn ordered_batch_stops_on_failure_and_retains_outstanding_requests() {
     assert_eq!(state.lock().unwrap().trace.len(), before);
     handler.usb.close().unwrap();
 }
+
+#[test]
+fn failed_shutdown_retains_ownership_across_repeated_interrupts() {
+    use fah::presentation::cli::{
+        formatters::OutputMode, handlers::Handler, runtime::run_with_signals, signals::Interrupt,
+    };
+    let (mut usb, state, device) = addressed();
+    usb.submit_request(control(device, 8)).unwrap();
+    state.lock().unwrap().fail = Some("close");
+    let mut handler = Handler::new(Fake(state.clone()));
+    handler.usb = usb;
+    let (_tx, rx) = std::sync::mpsc::channel();
+    let (mut out, mut err) = (vec![], vec![]);
+    let mut count = 0;
+    let code = run_with_signals(handler, rx, &mut out, &mut err, OutputMode::Json, || {
+        count += 1;
+        match count {
+            1 => Some(Interrupt::Term),
+            2 => {
+                assert_eq!(state.lock().unwrap().pending.len(), 1);
+                state.lock().unwrap().fail = None;
+                Some(Interrupt::Int)
+            }
+            _ => None,
+        }
+    });
+    assert_eq!(code, 1);
+    assert!(state.lock().unwrap().pending.is_empty());
+    let frames: Vec<serde_json::Value> = String::from_utf8(out)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(frames[0]["session_state"], "recovery_required");
+    assert_eq!(frames.last().unwrap()["session_state"], "closed");
+    assert!(!err.is_empty());
+}
+#[test]
+fn interrupting_wait_does_not_abort_usb_until_shutdown_is_explicit() {
+    use fah::presentation::cli::{
+        commands::ShellCommand, formatters::OutputMode, handlers::Handler,
+        runtime::run_with_signals, signals::Interrupt,
+    };
+    let (mut usb, state, device) = addressed();
+    let request = usb.submit_request(control(device, 8)).unwrap();
+    let mut handler = Handler::new(Fake(state.clone()));
+    handler.usb = usb;
+    handler.execute(ShellCommand::Wait {
+        id: request.id,
+        timeout_ms: 10000,
+    });
+    let (_tx, rx) = std::sync::mpsc::channel();
+    let (mut out, mut err) = (vec![], vec![]);
+    let mut count = 0;
+    assert_eq!(
+        run_with_signals(handler, rx, &mut out, &mut err, OutputMode::Json, || {
+            count += 1;
+            if count == 1 {
+                Some(Interrupt::Int)
+            } else {
+                assert_eq!(state.lock().unwrap().pending.len(), 1);
+                assert!(
+                    !state
+                        .lock()
+                        .unwrap()
+                        .trace
+                        .iter()
+                        .any(|op| op.starts_with("stop:"))
+                );
+                Some(Interrupt::Term)
+            }
+        }),
+        0
+    );
+    let frames: Vec<serde_json::Value> = String::from_utf8(out)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(frames[0]["kind"], "event");
+    assert_eq!(frames[0]["outcome"]["payload"]["usb_aborted"], false);
+    assert_eq!(frames.last().unwrap()["session_state"], "closed");
+}
+#[test]
+fn broken_output_and_eof_cannot_bypass_failed_close() {
+    use fah::presentation::cli::{
+        formatters::OutputMode, handlers::Handler, runtime::run_with_signals, signals::Interrupt,
+    };
+    struct Broken;
+    impl std::io::Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let (mut usb, state, device) = addressed();
+    usb.submit_request(control(device, 8)).unwrap();
+    state.lock().unwrap().fail = Some("close");
+    let mut handler = Handler::new(Fake(state.clone()));
+    handler.usb = usb;
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(Ok("state".into())).unwrap();
+    drop(tx);
+    let mut err = vec![];
+    assert_eq!(
+        run_with_signals(handler, rx, &mut Broken, &mut err, OutputMode::Json, || {
+            let mut state = state.lock().unwrap();
+            if state.trace.iter().any(|op| op == "close") && state.fail.is_some() {
+                assert_eq!(state.pending.len(), 1);
+                state.fail = None;
+                Some(Interrupt::Term)
+            } else {
+                None
+            }
+        }),
+        1
+    );
+    assert!(state.lock().unwrap().pending.is_empty());
+}

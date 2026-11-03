@@ -77,3 +77,38 @@ fn nested_request_fields_reject_typos_before_execution() {
     use fah::presentation::cli::commands::parse_line;
     assert!(parse_line(r#"{"op":"submit","request":{"device":{"session":1,"generation":1,"slot":1},"endpoint":0,"transfer_type":"control","direction":"in","length":0,"setup":{"request_type":128,"request":0,"value":0,"index":0,"length":0,"lenght":99}}}"#).is_err());
 }
+
+#[cfg(feature = "hosted-direct")]
+#[test]
+fn native_sigint_closes_idle_shell_with_valid_json() {
+    use std::{
+        io::{BufRead, BufReader, Write},
+        process::Stdio,
+    };
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fah"))
+        .args(["shell", "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(b"state\n").unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert!(serde_json::from_str::<serde_json::Value>(&line).is_ok());
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &child.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    line.clear();
+    reader.read_line(&mut line).unwrap();
+    let close: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(close["session_state"], "closed");
+    assert_eq!(close["outcome"]["payload"]["reason"], "sigint");
+    assert!(child.wait().unwrap().success());
+}
