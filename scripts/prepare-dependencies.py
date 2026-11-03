@@ -19,7 +19,7 @@ REV = 'e83b56b0672460b400105f3855222af58c03af87'
 CRAB_URL = 'https://github.com/drivercraft/CrabUSB.git'
 DMA_SHA = '6ce802d0c429c6966bea151e8e78eb5906d5b5e2cdebd0e960097cbe3654a3db'
 DMA_URL = 'https://static.crates.io/crates/dma-api/dma-api-0.7.3.crate'
-# Untracked top-level CrabUSB entries: Git metadata and the outputs of scripts/test-backend.py.
+# Untracked top-level CrabUSB entries: Git metadata and the outputs of tests/backend.py.
 # The FAH build reads none of them. Every other file must equal the pinned tree plus the patch.
 CRAB_OUTPUTS = frozenset({'.git', 'target', 'Cargo.lock'})
 

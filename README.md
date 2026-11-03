@@ -47,9 +47,9 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo clippy --locked --all-targets --features hosted-direct -- -D warnings
 cargo test --locked
 cargo test --locked --features hosted-direct
-python3 scripts/test-backend.py
+python3 tests/backend.py
 python3 -m unittest discover -s tests -p 'test_*.py'
-python3 scripts/check-capabilities.py
+python3 tests/capabilities.py
 ```
 
 Private backend tests use their own committed lockfile and the same maintained
@@ -73,7 +73,7 @@ source storage, not an upstream fork or an independent second controller owner.
 access and no changes. It rebuilds the expected trees from the pinned revision, the
 pinned archive and the patches in a temporary directory, then compares every file.
 Only CrabUSB's Git metadata and the top-level `target/` and `Cargo.lock` written by
-`scripts/test-backend.py` are excluded. A difference stops the command and stays in
+`tests/backend.py` are excluded. A difference stops the command and stays in
 place. Both modes give the same result from any working directory.
 
 CrabUSB changes expose explicit steps, hosted synchronization, reviewed DMA accesses,
@@ -95,7 +95,7 @@ An upstream change or a green build alone does not validate the updated driver.
 The tested host is Debian13 x86_64 with accessible `/dev/kvm`, QEMU10.0.8,
 Python3.13, BusyBox, kmod, `ldd`, `findmnt` and `dpkg-deb`. The machine type is pinned
 to `pc-q35-10.0`; the guest kernel/config/modules are fingerprinted in
-[`scripts/lab/kernel.json`](scripts/lab/kernel.json). The launcher needs at least
+[`tests/lab/kernel.json`](tests/lab/kernel.json). The launcher needs at least
 4GiB available host memory and 2GiB free disk before starting its **2GiB/2vCPU**
 headless guest. It checks current headroom; this is not a guarantee against host crashes.
 
@@ -157,14 +157,14 @@ git switch release/v0.1.0
 python3 scripts/prepare-dependencies.py
 cargo clean --release
 cargo build --locked --release --features hosted-direct
-python3 scripts/lab.py plan
-python3 scripts/lab.py prepare --kernel-root "$FAH_KERNEL_DIR/root"
-python3 scripts/lab.py run --suite feasibility
-python3 scripts/lab.py run --suite fixture
-python3 scripts/lab.py run --suite smoke
-python3 scripts/lab.py run --suite smoke
-python3 scripts/lab.py run --suite explicit
-python3 scripts/lab.py run --suite faults
+python3 tests/lab/lab.py plan
+python3 tests/lab/lab.py prepare --kernel-root "$FAH_KERNEL_DIR/root"
+python3 tests/lab/lab.py run --suite feasibility
+python3 tests/lab/lab.py run --suite fixture
+python3 tests/lab/lab.py run --suite smoke
+python3 tests/lab/lab.py run --suite smoke
+python3 tests/lab/lab.py run --suite explicit
+python3 tests/lab/lab.py run --suite faults
 ```
 
 With the exact kernel already installed, omit `--kernel-root` to use `/` as the
@@ -196,8 +196,8 @@ Generated files stay inside the checkout and are ignored by Git:
 trace is independent of FAH logging and is not a physical USB analyzer capture.
 
 ```sh
-python3 scripts/lab.py stop --run <generated-run-directory-name>
-python3 scripts/lab.py cleanup --run <generated-run-directory-name>
+python3 tests/lab/lab.py stop --run <generated-run-directory-name>
+python3 tests/lab/lab.py cleanup --run <generated-run-directory-name>
 ```
 
 Stop validates that the recorded PID belongs to that generated QEMU. Cleanup requires
@@ -263,7 +263,7 @@ host endpoint setup are separate operations. Inspection does not perform these s
 
 The following syntax examples use **illustrative IDs**; replace the complete ID from
 your own responses. The automated guest client in
-[`scripts/lab/guest.py`](scripts/lab/guest.py) demonstrates extracting real IDs.
+[`tests/lab/guest.py`](tests/lab/guest.py) demonstrates extracting real IDs.
 
 ```json
 {"op":"port_reset","port":{"session":123,"generation":1,"number":2},"warm":false}
@@ -338,7 +338,7 @@ buffer lifetimes. VFIO/MMIO is **local** access. The CLI never creates a second 
 or gives caller pointers to an uncoordinated raw ring.
 
 The inventory below is generated from `fah capabilities`; `python3
-scripts/check-capabilities.py` verifies agreement. JSON also includes implementation/test
+tests/capabilities.py` verifies agreement. JSON also includes implementation/test
 references and exact guest run provenance. Source implementation baseline is4f0f03a;
 release packages record their final source/binary fingerprints separately.
 

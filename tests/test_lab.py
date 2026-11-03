@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location('fah_guest', ROOT / 'scripts/lab/guest.py')
+spec = importlib.util.spec_from_file_location('fah_guest', ROOT / 'tests/lab/guest.py')
 guest = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guest)
 
@@ -56,7 +56,7 @@ class GuestMetadata(unittest.TestCase):
 if __name__ == '__main__':
     unittest.main()
 
-host_spec = importlib.util.spec_from_file_location('fah_lab', ROOT / 'scripts/lab.py')
+host_spec = importlib.util.spec_from_file_location('fah_lab', ROOT / 'tests/lab/lab.py')
 lab = importlib.util.module_from_spec(host_spec)
 host_spec.loader.exec_module(lab)
 
@@ -121,9 +121,9 @@ class LabGuards(unittest.TestCase):
         release_spec.loader.exec_module(release)
         self.assertEqual((lab.DEFAULT_LAB, lab.EVIDENCE, release.OUTPUT), (ROOT / 'target/fah-lab', ROOT / 'docs/evidence', ROOT / 'target/fah-release'))
         for path in (lab.DEFAULT_LAB, lab.EVIDENCE, release.OUTPUT):
-            # Ignored outputs keep release_only() clean, and nothing generated lives in scripts/ (#62).
+            # Ignored outputs keep release_only() clean, and nothing generated lives in scripts/ or tests/ (#62, #64).
             subprocess.run(['git', '-C', str(ROOT), 'check-ignore', '-q', str(path / 'probe')], check=True)
-            self.assertFalse(path.is_relative_to(ROOT / 'scripts'))
+            self.assertFalse(any(path.is_relative_to(ROOT / folder) for folder in ('scripts', 'tests')))
         self.assertFalse(lab.EVIDENCE.is_relative_to(ROOT / 'target'))  # cargo clean must not delete evidence
         self.assertFalse(release.OUTPUT.is_relative_to(ROOT / 'target/release'))  # the clean candidate build removes it (#63)
 
