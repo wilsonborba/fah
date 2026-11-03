@@ -33,6 +33,7 @@ impl ControllerBackend for Backend {
             target: None,
             interrupt_mode: None,
             retained_allocations: 0,
+            close_stage: None,
         }
     }
     fn close(&mut self) -> Result<(), OperationError> {

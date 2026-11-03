@@ -32,6 +32,8 @@ pub struct LocalController {
     pending: std::collections::BTreeMap<u64, PendingRequest>,
     next_request: u64,
     ring_rebuilds: u32,
+    shutdown: super::teardown::CloseProgress,
+    closing: bool,
 }
 impl LocalController {
     pub fn new(run_id: String) -> Self {
@@ -48,6 +50,8 @@ impl LocalController {
             pending: std::collections::BTreeMap::new(),
             next_request: 1,
             ring_rebuilds: 0,
+            shutdown: Default::default(),
+            closing: false,
         }
     }
     pub fn port_count(&self) -> Result<u8, OperationError> {
@@ -156,51 +160,25 @@ impl LocalController {
             }
             .map_err(|e| format!("{e:?}"))?,
         );
-        let mode = select_mode(&resource.device).map_err(|e| e.to_string())?;
-        let binding = Arc::new(
-            InterruptBinding::register(resource.device.clone(), mode).map_err(|e| e.to_string())?,
-        );
-        self.binding = Some(binding.clone());
-        // Enable Memory Space and Bus Master only after guest-only ownership and maps.
-        // Config writes use checked pwrite rather than the library's log-only wrapper.
-        if resource.device.get_region_size(7) < 6 || resource.device.get_region_flags(7) & 3 != 3 {
-            return Err("PCI configuration region unavailable or read-only".into());
-        }
-        let config = resource
-            .device
-            .get_region_offset(7)
-            .checked_add(4)
-            .and_then(|offset| i64::try_from(offset).ok())
-            .ok_or("PCI configuration offset overflow")?;
-        let mut command = [0u8; 2];
-        let read = unsafe {
-            libc::pread(
-                resource.device.as_raw_fd(),
-                command.as_mut_ptr().cast(),
-                2,
-                config,
-            )
-        };
-        if read != 2 {
-            return Err("cannot read guest PCI command".into());
-        }
-        let command = (u16::from_le_bytes(command) | 6).to_le_bytes();
-        let written = unsafe {
-            libc::pwrite(
-                resource.device.as_raw_fd(),
-                command.as_ptr().cast(),
-                2,
-                config,
-            )
-        };
-        if written != 2 {
-            return Err("cannot enable guest PCI memory/DMA".into());
-        }
+        let device = resource.device.clone();
+        let mode = select_mode(&device).map_err(|e| e.to_string())?;
+        let binding_slot = &mut self.binding;
         block_until(
-            self.host.as_mut().unwrap().initialize(),
+            self.host
+                .as_mut()
+                .unwrap()
+                .initialize_with_dma_hook(move || {
+                    let binding = Arc::new(
+                        InterruptBinding::register(device.clone(), mode)
+                            .map_err(|e| crab_usb::usb_if::err::USBError::from(e.to_string()))?,
+                    );
+                    *binding_slot = Some(binding);
+                    set_pci_dma(&device, true).map_err(crab_usb::usb_if::err::USBError::from)
+                }),
             Duration::from_secs(5),
         )?
         .map_err(|e| format!("{e:?}"))?;
+        let binding = self.binding.as_ref().unwrap().clone();
         let handler = self.host.as_mut().unwrap().event_handler();
         self.pump = Some(
             EventPump::start(
@@ -228,8 +206,19 @@ impl ControllerBackend for LocalController {
                 retained: false,
                 error: os_error(message),
             })?;
+        self.shutdown = Default::default();
+        self.closing = false;
+        self.ring_rebuilds = 0;
         self.resources = Some(resource);
         self.target = Some(target.into());
+        // Ownership is explicit but controller state is still unknown. Prevent
+        // any old engine from DMA through the new container mappings.
+        set_pci_dma(&self.resources.as_ref().unwrap().device, false).map_err(|message| {
+            AcquisitionFailure {
+                retained: true,
+                error: os_error(message),
+            }
+        })?;
         Ok(())
     }
     fn initialize(&mut self) -> Result<(), OperationError> {
@@ -243,15 +232,19 @@ impl ControllerBackend for LocalController {
                 .as_ref()
                 .map(|b| format!("{:?}", b.mode).to_lowercase()),
             retained_allocations: self.adapter.map_or(0, |a| a.retained_allocations()),
+            close_stage: self.closing.then(|| format!("{:?}", self.shutdown.stage())),
         }
     }
     fn close(&mut self) -> Result<(), OperationError> {
-        // Coordinated hardware halt and teardown is gated by #17. Keep every resource.
-        Err(OperationError {
-            category: ErrorCategory::Unsupported,
-            message: "coordinated close is unavailable until teardown gate #17".into(),
-            os_code: None,
-            completion_code: None,
+        let mut progress = std::mem::take(&mut self.shutdown);
+        let result = progress.drive(&mut LocalShutdown(self));
+        let stage = progress.stage();
+        self.shutdown = progress;
+        result.map_err(|message| {
+            recovery_error(
+                format!("close failed at {stage:?}: {message}; resources retained; retry close"),
+                None,
+            )
         })
     }
 }
@@ -477,6 +470,11 @@ struct PendingRequest {
 }
 impl LocalController {
     fn check_event_pump(&self) -> Result<(), OperationError> {
+        if self.closing {
+            return Err(OperationError::validation(
+                "controller teardown in progress; retry close",
+            ));
+        }
         let pump = self
             .pump
             .as_ref()
@@ -800,5 +798,156 @@ impl crate::domain::services::recovery::RecoveryBackend for LocalController {
             restart_ready,
             error,
         })
+    }
+}
+
+/// Only this private facade may run individual shutdown stages on a real owner.
+struct LocalShutdown<'a>(&'a mut LocalController);
+impl super::teardown::ShutdownBackend for LocalShutdown<'_> {
+    fn close_step(&mut self, stage: super::teardown::CloseStage) -> Result<(), String> {
+        use super::teardown::CloseStage::*;
+        let owner = &mut self.0;
+        match stage {
+            StopSubmissions => {
+                owner.closing = true;
+            }
+            HaltController => {
+                if let (Some(mapping), Some(layout)) = (&owner.mapping, &owner.layout) {
+                    halt_mapping(mapping, layout, Duration::from_secs(5))?;
+                } else if owner.adapter.is_some()
+                    || owner.host.is_some()
+                    || !owner.pending.is_empty()
+                {
+                    return Err(
+                        "cannot establish DMA stop without validated register mapping".into(),
+                    );
+                }
+                // No mapping/adapter/host means no FAH DMA was allocated or published.
+            }
+            DisableBusMaster => {
+                if let Some(resource) = &owner.resources {
+                    set_pci_dma(&resource.device, false)?;
+                }
+            }
+            DisableInterrupts => {
+                if let Some(binding) = &owner.binding {
+                    unsafe { binding.disable_after_quiescence() }.map_err(|e| e.to_string())?;
+                }
+            }
+            JoinEventPump => {
+                if let Some(pump) = owner.pump.take() {
+                    let drain = pump
+                        .stop()
+                        .map_err(|_| "event worker panicked after controller halt")?;
+                    drop(drain);
+                }
+            }
+            DropDriver => {
+                drop(owner.host.take());
+                owner.pending.clear();
+                drop(owner.binding.take());
+            }
+            ReclaimDma => {
+                if let Some(adapter) = owner.adapter {
+                    unsafe { adapter.reclaim_retired_after_quiescence() }?;
+                    if adapter.retained_allocations() != 0 {
+                        return Err("live DMA handles remain after driver destruction".into());
+                    }
+                }
+            }
+            ReleaseAdapter => {
+                if let Some(adapter) = owner.adapter.take() {
+                    // SAFETY: controller halted, IRQs disabled, worker joined, all CrabUSB
+                    // Kernel/DMA handles destroyed, and successful unmap verified above.
+                    // This reverses the one Box::leak used for the required static KernelOp.
+                    unsafe {
+                        drop(Box::from_raw(adapter as *const Adapter as *mut Adapter));
+                    }
+                }
+            }
+            ReleaseBar => {
+                if let Some(mapping) = owner.mapping.as_mut() {
+                    unsafe { mapping.unmap_after_quiescence() }?;
+                }
+                owner.mapping = None;
+                owner.layout = None;
+            }
+            ReleaseVfio => {
+                drop(owner.resources.take());
+                owner.target = None;
+            }
+            Done => {}
+        }
+        Ok(())
+    }
+}
+fn set_pci_dma(device: &vfio_ioctls::VfioDevice, enabled: bool) -> Result<(), String> {
+    if device.get_region_size(7) < 6 || device.get_region_flags(7) & 3 != 3 {
+        return Err("PCI configuration region unavailable/read-only".into());
+    }
+    let offset = device
+        .get_region_offset(7)
+        .checked_add(4)
+        .and_then(|offset| i64::try_from(offset).ok())
+        .ok_or("PCI configuration offset overflow")?;
+    let mut bytes = [0u8; 2];
+    // SAFETY: valid initialized two-byte CPU buffers and checked configuration offset.
+    if unsafe { libc::pread(device.as_raw_fd(), bytes.as_mut_ptr().cast(), 2, offset) } != 2 {
+        return Err("cannot read PCI command".into());
+    }
+    let command = u16::from_le_bytes(bytes) | 2;
+    let command = if enabled { command | 4 } else { command & !4 };
+    let bytes = command.to_le_bytes();
+    if unsafe { libc::pwrite(device.as_raw_fd(), bytes.as_ptr().cast(), 2, offset) } != 2 {
+        return Err("cannot write PCI command".into());
+    }
+    let mut observed = [0u8; 2];
+    if unsafe { libc::pread(device.as_raw_fd(), observed.as_mut_ptr().cast(), 2, offset) } != 2 {
+        return Err("cannot verify PCI command".into());
+    }
+    if u16::from_le_bytes(observed) & 6 != command & 6 {
+        return Err("PCI memory/DMA command readback mismatch".into());
+    }
+    Ok(())
+}
+fn halt_mapping(
+    mapping: &MappedRegion,
+    layout: &resources::RegisterLayout,
+    timeout: Duration,
+) -> Result<(), String> {
+    let command = unsafe {
+        mapping
+            .pointer()
+            .as_ptr()
+            .add(layout.operational)
+            .cast::<u32>()
+    };
+    let status = unsafe { command.add(1) };
+    let deadline = Instant::now() + timeout;
+    // Wait for reset/not-ready to clear before any operational register update.
+    loop {
+        if unsafe { status.read_volatile() } & (1 << 11) == 0
+            && unsafe { command.read_volatile() } & 2 == 0
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("controller not ready during close".into());
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let value = unsafe { command.read_volatile() };
+    unsafe {
+        command.write_volatile(value & !5);
+    }
+    loop {
+        let value = unsafe { status.read_volatile() };
+        if value & 1 != 0 && value & (1 << 11) == 0 {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err("controller halt timed out; DMA ownership retained".into());
+        }
+        std::thread::sleep(Duration::from_millis(1));
     }
 }

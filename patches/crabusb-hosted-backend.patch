@@ -96,10 +96,10 @@ index 71b939e..4ab690c 100644
 -    }
 -}
 diff --git a/usb-host/src/backend/kmod/mod.rs b/usb-host/src/backend/kmod/mod.rs
-index e17466d..4594cdb 100644
+index e17466d..8f8777a 100644
 --- a/usb-host/src/backend/kmod/mod.rs
 +++ b/usb-host/src/backend/kmod/mod.rs
-@@ -50,3 +50,122 @@ pub struct DeviceAddressInfo {
+@@ -50,3 +50,127 @@ pub struct DeviceAddressInfo {
      pub port_id: u8,
      pub infos: BTreeMap<Id<Hub>, HubInfo>,
  }
@@ -118,6 +118,11 @@ index e17466d..4594cdb 100644
 +        Ok(Self {core:Xhci::new(mmio,kernel)?,devices:BTreeMap::new()})
 +    }
 +    pub async fn initialize(&mut self)->Result<()> {self.core.init().await}
++    /// Called after reset and ring programming, immediately before Run/Stop.
++    pub async fn initialize_with_dma_hook(&mut self,before_start:impl FnOnce()->Result<()>+Send)->Result<()> {
++        self.core.init_with_dma_hook(before_start).await
++    }
++
 +    pub fn port_count(&self)->u8 {self.core.reg.read().port_register_set.len() as u8}
 +    /// Read only: no PORTSC W1C acknowledgment and no discovery helper.
 +    pub fn port_status(&self,number:u8)->Result<u32> {
@@ -793,6 +798,28 @@ index 27eeae2..12f8e2b 100644
 +    }
 +
 +}
+diff --git a/usb-host/src/backend/kmod/xhci/host.rs b/usb-host/src/backend/kmod/xhci/host.rs
+index 243859e..4aea6f4 100644
+--- a/usb-host/src/backend/kmod/xhci/host.rs
++++ b/usb-host/src/backend/kmod/xhci/host.rs
+@@ -141,7 +141,8 @@ impl Xhci {
+         })
+     }
+ 
+-    async fn _init(&mut self) -> Result {
++    async fn _init(&mut self)->Result {self.init_with_dma_hook(||Ok(())).await}
++    pub(crate) async fn init_with_dma_hook(&mut self,before_start:impl FnOnce()->Result<()>+Send)->Result {
+         self.disable_irq();
+         // 4.2 Host Controller Initialization
+         self.init_ext_caps().await?;
+@@ -173,6 +174,7 @@ impl Xhci {
+         // (5.4.8) will begin reporting device connects, etc., and system software may begin
+         // enumerating devices. System software may follow the procedures described in
+         // section 4.3, to enumerate attached devices.
++        before_start()?;
+         self.start();
+         mb();
+ 
 diff --git a/usb-host/src/backend/kmod/xhci/mod.rs b/usb-host/src/backend/kmod/xhci/mod.rs
 index 8c82dc7..0a1169d 100644
 --- a/usb-host/src/backend/kmod/xhci/mod.rs

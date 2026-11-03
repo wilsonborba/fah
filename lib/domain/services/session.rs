@@ -6,6 +6,7 @@ pub struct ControllerSnapshot {
     pub target: Option<String>,
     pub interrupt_mode: Option<String>,
     pub retained_allocations: usize,
+    pub close_stage: Option<String>,
 }
 /// An acquire error states whether any resources with uncertain ownership remain.
 pub struct AcquisitionFailure {
@@ -17,7 +18,9 @@ pub trait ControllerBackend {
     fn initialize(&mut self) -> Result<(), OperationError>;
     /// Pure inspection: must not enumerate, reset, address or configure.
     fn inspect(&self) -> ControllerSnapshot;
-    /// Success means DMA is quiescent, interrupts stopped, mappings released.
+    /// Success means owned FAH DMA is quiescent, workers stopped and mappings
+    /// released. With no FAH allocation/publication, ownership can be released
+    /// without asserting the prior foreign engine was initialized by FAH.
     fn close(&mut self) -> Result<(), OperationError>;
 }
 /// Not Clone; all effects require exclusive access to this owner. Resource Drop

@@ -64,3 +64,5 @@ pub mod iommu;
 
 #[cfg(feature = "hosted-direct")]
 pub mod controller;
+
+pub mod teardown;

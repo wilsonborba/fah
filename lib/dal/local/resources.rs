@@ -154,6 +154,18 @@ pub mod mapping {
                 _file: file,
             })
         }
+        /// # Safety
+        /// Every raw consumer must be stopped and destroyed before unmapping.
+        pub unsafe fn unmap_after_quiescence(&mut self) -> Result<(), String> {
+            if self.length == 0 {
+                return Ok(());
+            }
+            if unsafe { libc::munmap(self.address.as_ptr().cast(), self.length) } != 0 {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+            self.length = 0;
+            Ok(())
+        }
         pub fn pointer(&self) -> NonNull<u8> {
             self.address
         }
@@ -165,8 +177,10 @@ pub mod mapping {
         fn drop(&mut self) {
             // SAFETY: Only this owner releases this exact mapping. Raw consumers
             // must already be stopped under the constructor contract.
-            unsafe {
-                libc::munmap(self.address.as_ptr().cast(), self.length);
+            if self.length != 0 {
+                unsafe {
+                    libc::munmap(self.address.as_ptr().cast(), self.length);
+                }
             }
         }
     }
