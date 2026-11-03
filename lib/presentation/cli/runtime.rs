@@ -16,7 +16,11 @@ pub fn read_command(
     let mut oversized = false;
     let mut seen = false;
     loop {
-        let available = reader.fill_buf()?;
+        let available = match reader.fill_buf() {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
         if available.is_empty() {
             break;
         }
@@ -47,77 +51,159 @@ pub fn read_command(
     })))
 }
 pub fn run<B: ExplicitBackend>(
-    mut handler: Handler<B>,
+    handler: Handler<B>,
     input: mpsc::Receiver<Result<String, OperationError>>,
     out: &mut impl Write,
     err: &mut impl Write,
     mode: OutputMode,
 ) -> i32 {
+    run_with_signals(handler, input, out, err, mode, || None)
+}
+fn failed(frame: &super::outputs::Frame) -> bool {
+    matches!(
+        frame.result.outcome,
+        crate::domain::models::Outcome::Failed(_) | crate::domain::models::Outcome::Partial { .. }
+    )
+}
+fn emit(
+    out: &mut impl Write,
+    err: &mut impl Write,
+    frame: &super::outputs::Frame,
+    mode: OutputMode,
+) -> bool {
+    if formatters::write(out, frame, mode).is_err() {
+        let _ = writeln!(
+            err,
+            "output unavailable; retaining ownership until coordinated close succeeds"
+        );
+        false
+    } else {
+        true
+    }
+}
+/// Interrupts cancel CLI waits first; idle INT and TERM request coordinated close.
+/// EOF/output failure stays alive and retries close if quiescence is uncertain.
+pub fn run_with_signals<B: ExplicitBackend>(
+    mut handler: Handler<B>,
+    input: mpsc::Receiver<Result<String, OperationError>>,
+    out: &mut impl Write,
+    err: &mut impl Write,
+    mode: OutputMode,
+    mut signal: impl FnMut() -> Option<super::signals::Interrupt>,
+) -> i32 {
+    use super::signals::Interrupt;
+    use std::time::{Duration, Instant};
     let mut code = 0;
+    let mut reason = None;
+    let mut eof = false;
+    let mut output = true;
+    let mut next_close = Instant::now();
     loop {
-        for frame in handler.tick() {
-            if matches!(
-                frame.result.outcome,
-                crate::domain::models::Outcome::Failed(_)
-                    | crate::domain::models::Outcome::Partial { .. }
-            ) {
-                code = 1;
-            }
-            if formatters::write(out, &frame, mode).is_err() {
-                let _ = handler.usb.close();
-                return 1;
+        if let Some(interrupt) = signal() {
+            if matches!(interrupt, Interrupt::Int) && handler.has_waits() && reason.is_none() {
+                for frame in handler.cancel_waits("sigint_wait_only") {
+                    if output && !emit(out, err, &frame, mode) {
+                        output = false;
+                        code = 1;
+                        reason = Some("output_failure");
+                    }
+                }
+            } else {
+                reason = Some(match interrupt {
+                    Interrupt::Int => "sigint",
+                    Interrupt::Term => "sigterm",
+                });
+                next_close = Instant::now();
             }
         }
-        let line = match input.recv_timeout(std::time::Duration::from_millis(5)) {
+        if let Some(reason) = reason {
+            if Instant::now() >= next_close {
+                for frame in handler.cancel_waits(reason) {
+                    if output && !emit(out, err, &frame, mode) {
+                        output = false;
+                        code = 1;
+                    }
+                }
+                let result = handler
+                    .usb
+                    .close()
+                    .map(|()| serde_json::json!({"closed":true,"reason":reason}));
+                let closed = result.is_ok();
+                if !closed {
+                    code = 1;
+                    let _ = writeln!(
+                        err,
+                        "close incomplete; resources retained; retrying coordinated close"
+                    );
+                }
+                let frame = handler.respond(result);
+                if output && !emit(out, err, &frame, mode) {
+                    output = false;
+                    code = 1;
+                }
+                if closed {
+                    return code;
+                }
+                next_close = Instant::now() + Duration::from_millis(250);
+            }
+        } else {
+            for frame in handler.tick() {
+                if failed(&frame) {
+                    code = 1;
+                }
+                if output && !emit(out, err, &frame, mode) {
+                    output = false;
+                    code = 1;
+                    reason = Some("output_failure");
+                }
+            }
+        }
+        if eof || !output {
+            std::thread::sleep(Duration::from_millis(5));
+            continue;
+        }
+        let line = match input.recv_timeout(Duration::from_millis(5)) {
             Ok(line) => line,
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                eof = true;
+                reason = Some("eof");
+                next_close = Instant::now();
+                continue;
+            }
         };
-        let parsed = line.and_then(|line| parse_line(&line));
-        let frame = match parsed {
+        let frame = match line.and_then(|line| parse_line(&line)) {
             Ok(command) => handler.execute(command),
             Err(error) => handler.respond(Err(error)),
         };
-        if matches!(
-            frame.result.outcome,
-            crate::domain::models::Outcome::Failed(_)
-                | crate::domain::models::Outcome::Partial { .. }
-        ) {
+        if failed(&frame) {
             code = 1;
         }
-        if formatters::write(out, &frame, mode).is_err() {
-            let _ = writeln!(err, "output failed; attempting coordinated close");
-            let _ = handler.usb.close();
-            return 1;
+        if !emit(out, err, &frame, mode) {
+            output = false;
+            code = 1;
+            reason = Some("output_failure");
+            next_close = Instant::now();
         }
         if handler.quitting {
             for frame in handler.cancel_waits("quit") {
-                if formatters::write(out, &frame, mode).is_err() {
+                if output && !emit(out, err, &frame, mode) {
                     code = 1;
                 }
             }
             return code;
         }
     }
-    for frame in handler.cancel_waits("eof") {
-        if formatters::write(out, &frame, mode).is_err() {
-            code = 1;
-        }
-    }
-    let result = handler
-        .usb
-        .close()
-        .map(|()| serde_json::json!({"closed":true,"reason":"eof"}));
-    if result.is_err() {
-        code = 1;
-    }
-    if formatters::write(out, &handler.respond(result), mode).is_err() {
-        code = 1;
-    }
-    code
 }
 #[cfg(feature = "hosted-direct")]
 pub fn stdin_shell(run_id: String, json: bool, out: &mut impl Write, err: &mut impl Write) -> i32 {
+    let guard = match super::signals::Guard::install() {
+        Ok(guard) => guard,
+        Err(error) => {
+            let _ = writeln!(err, "cannot install shutdown signals: {error}");
+            return 1;
+        }
+    };
     let (tx, rx) = mpsc::sync_channel(128);
     std::thread::spawn(move || {
         let mut input = io::stdin().lock();
@@ -129,6 +215,7 @@ pub fn stdin_shell(run_id: String, json: bool, out: &mut impl Write, err: &mut i
                     }
                 }
                 Ok(None) => break,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) => {
                     let _ = tx.send(Err(OperationError::validation(format!(
                         "input error: {error}"
@@ -138,7 +225,7 @@ pub fn stdin_shell(run_id: String, json: bool, out: &mut impl Write, err: &mut i
             }
         }
     });
-    run(
+    run_with_signals(
         Handler::new(crate::dal::local::controller::LocalController::new(run_id)),
         rx,
         out,
@@ -148,5 +235,6 @@ pub fn stdin_shell(run_id: String, json: bool, out: &mut impl Write, err: &mut i
         } else {
             OutputMode::Human
         },
+        || guard.take(),
     )
 }
