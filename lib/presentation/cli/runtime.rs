@@ -4,7 +4,7 @@ use super::{
     formatters::{self, OutputMode},
     handlers::Handler,
 };
-use crate::domain::{models::OperationError, services::usb::DeviceBackend};
+use crate::domain::{models::OperationError, services::explicit::ExplicitBackend};
 use std::{
     io::{self, BufRead, Write},
     sync::mpsc,
@@ -46,7 +46,7 @@ pub fn read_command(
         OperationError::validation("input is not UTF-8")
     })))
 }
-pub fn run<B: DeviceBackend>(
+pub fn run<B: ExplicitBackend>(
     mut handler: Handler<B>,
     input: mpsc::Receiver<Result<String, OperationError>>,
     out: &mut impl Write,
@@ -54,7 +54,25 @@ pub fn run<B: DeviceBackend>(
     mode: OutputMode,
 ) -> i32 {
     let mut code = 0;
-    while let Ok(line) = input.recv() {
+    loop {
+        for frame in handler.tick() {
+            if matches!(
+                frame.result.outcome,
+                crate::domain::models::Outcome::Failed(_)
+                    | crate::domain::models::Outcome::Partial { .. }
+            ) {
+                code = 1;
+            }
+            if formatters::write(out, &frame, mode).is_err() {
+                let _ = handler.usb.close();
+                return 1;
+            }
+        }
+        let line = match input.recv_timeout(std::time::Duration::from_millis(5)) {
+            Ok(line) => line,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         let parsed = line.and_then(|line| parse_line(&line));
         let frame = match parsed {
             Ok(command) => handler.execute(command),
@@ -63,6 +81,7 @@ pub fn run<B: DeviceBackend>(
         if matches!(
             frame.result.outcome,
             crate::domain::models::Outcome::Failed(_)
+                | crate::domain::models::Outcome::Partial { .. }
         ) {
             code = 1;
         }
@@ -72,7 +91,17 @@ pub fn run<B: DeviceBackend>(
             return 1;
         }
         if handler.quitting {
+            for frame in handler.cancel_waits("quit") {
+                if formatters::write(out, &frame, mode).is_err() {
+                    code = 1;
+                }
+            }
             return code;
+        }
+    }
+    for frame in handler.cancel_waits("eof") {
+        if formatters::write(out, &frame, mode).is_err() {
+            code = 1;
         }
     }
     let result = handler

@@ -51,10 +51,88 @@ pub enum ShellCommand {
     Version,
     Capabilities,
     State,
-    Open { target: String },
+    Open {
+        target: String,
+    },
     Init,
     Close,
     Quit,
+    Ports,
+    Devices,
+    Requests,
+    PortAck {
+        port: crate::domain::models::ports::PortId,
+        changes: u32,
+    },
+    PortReset {
+        port: crate::domain::models::ports::PortId,
+        #[serde(default)]
+        warm: bool,
+    },
+    SlotEnable {
+        port: crate::domain::models::ports::PortId,
+    },
+    Address {
+        device: crate::domain::services::usb::DeviceId,
+        #[serde(default)]
+        bsr: bool,
+    },
+    Descriptor {
+        device: crate::domain::services::usb::DeviceId,
+        request: crate::domain::models::descriptors::DescriptorRequest,
+    },
+    PacketSize {
+        device: crate::domain::services::usb::DeviceId,
+        size: u16,
+    },
+    Configuration {
+        device: crate::domain::services::usb::DeviceId,
+        value: u8,
+    },
+    Interface {
+        device: crate::domain::services::usb::DeviceId,
+        interface: u8,
+        alternate: u8,
+    },
+    Endpoints {
+        device: crate::domain::services::usb::DeviceId,
+        interface: u8,
+        #[serde(default)]
+        alternate: u8,
+    },
+    Submit {
+        request: crate::domain::models::requests::RequestSpec,
+    },
+    ControlPlan {
+        plan: crate::domain::models::control_plan::ControlPlan,
+    },
+    Status {
+        id: crate::domain::models::RequestId,
+    },
+    Poll {
+        id: crate::domain::models::RequestId,
+    },
+    Wait {
+        id: crate::domain::models::RequestId,
+        timeout_ms: u64,
+    },
+    Reclaim {
+        id: crate::domain::models::RequestId,
+    },
+    LogicalCancel {
+        id: crate::domain::models::RequestId,
+    },
+    Abort {
+        id: crate::domain::models::RequestId,
+    },
+    ResetEndpoint {
+        id: crate::domain::models::RequestId,
+        preserve: bool,
+    },
+    Noop,
+    Unsupported {
+        capability: String,
+    },
 }
 pub fn parse_line(line: &str) -> Result<ShellCommand, OperationError> {
     if line.len() > MAX_LINE {
@@ -65,6 +143,8 @@ pub fn parse_line(line: &str) -> Result<ShellCommand, OperationError> {
         "version" => Ok(ShellCommand::Version),
         "capabilities" => Ok(ShellCommand::Capabilities),
         "state" => Ok(ShellCommand::State),
+        "ports" => Ok(ShellCommand::Ports),
+        "noop" => Ok(ShellCommand::Noop),
         "init" => Ok(ShellCommand::Init),
         "close" => Ok(ShellCommand::Close),
         "quit" => Ok(ShellCommand::Quit),

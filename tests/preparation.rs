@@ -720,3 +720,102 @@ fn persistent_cli_keeps_one_owner_and_frames_failures_without_mutation() {
         ["acquire", "init-controller", "close"]
     );
 }
+
+#[test]
+fn cli_explicit_usb_steps_and_async_wait_preserve_request_ownership() {
+    use fah::{
+        domain::models::Outcome,
+        presentation::cli::{
+            commands::{ShellCommand, parse_line},
+            handlers::Handler,
+        },
+    };
+    use serde_json::json;
+    let (usb, state) = fixture();
+    let mut handler = Handler::new(Fake(state.clone()));
+    handler.usb = usb;
+    let mut call = |value: serde_json::Value| {
+        handler
+            .dispatch(parse_line(&value.to_string()).unwrap())
+            .unwrap()
+    };
+    let ports = call(json!({"op":"ports"}));
+    let port = ports[0]["id"].clone();
+    call(json!({"op":"port_ack","port":port,"changes":0}));
+    let port = call(json!({"op":"port_reset","port":port}))["id"].clone();
+    let device = call(json!({"op":"slot_enable","port":port}))["id"].clone();
+    call(json!({"op":"address","device":device,"bsr":true}));
+    call(json!({"op":"address","device":device}));
+    call(
+        json!({"op":"descriptor","device":device,"request":{"kind":2,"index":0,"language":0,"length":25}}),
+    );
+    call(json!({"op":"packet_size","device":device,"size":8}));
+    call(json!({"op":"configuration","device":device,"value":2}));
+    call(json!({"op":"interface","device":device,"interface":0,"alternate":0}));
+    call(json!({"op":"endpoints","device":device,"interface":0}));
+    let request = call(
+        json!({"op":"submit","request":{"device":device,"endpoint":129,"transfer_type":"interrupt","direction":"in","length":8,"setup":null}}),
+    );
+    let id: fah::domain::models::RequestId = serde_json::from_value(request["id"].clone()).unwrap();
+    let accepted = handler.execute(ShellCommand::Wait { id, timeout_ms: 0 });
+    assert!(matches!(accepted.result.outcome, Outcome::Pending));
+    let events = handler.tick();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, "event");
+    assert_eq!(events[0].result.operation_id, accepted.result.operation_id);
+    assert!(matches!(events[0].result.outcome, Outcome::Partial { .. }));
+    assert_eq!(state.lock().unwrap().pending.len(), 1);
+    assert!(handler.usb.reclaim_request(id).is_err());
+    handler.execute(ShellCommand::LogicalCancel { id });
+    assert_eq!(state.lock().unwrap().pending.len(), 1);
+    let token = state.lock().unwrap().next_token;
+    state
+        .lock()
+        .unwrap()
+        .completions
+        .insert(token, complete(3, 13, vec![1, 2, 3]));
+    let accepted = handler.execute(ShellCommand::Wait {
+        id,
+        timeout_ms: 100,
+    });
+    assert!(matches!(accepted.result.outcome, Outcome::Pending));
+    assert!(matches!(
+        handler.execute(ShellCommand::State).result.outcome,
+        Outcome::Completed(_)
+    ));
+    let event = handler.tick().remove(0);
+    assert!(matches!(event.result.outcome, Outcome::Completed(_)));
+    let reclaimed = handler.dispatch(ShellCommand::Reclaim { id }).unwrap();
+    assert_eq!(reclaimed["data"], json!([1, 2, 3]));
+    assert_eq!(reclaimed["state"]["completion_code"], 13);
+    let before = state.lock().unwrap().trace.len();
+    let bad = handler.execute(ShellCommand::Unsupported {
+        capability: "direct_dpdm".into(),
+    });
+    assert!(matches!(bad.result.outcome, Outcome::Failed(_)));
+    assert_eq!(state.lock().unwrap().trace.len(), before);
+    handler.usb.close().unwrap();
+}
+#[test]
+fn cli_abort_reports_partial_progress_instead_of_success() {
+    use fah::{
+        domain::models::Outcome,
+        presentation::cli::{commands::ShellCommand, handlers::Handler},
+    };
+    let (mut usb, state, device) = addressed();
+    let request = usb.submit_request(control(device, 8)).unwrap();
+    state.lock().unwrap().fail = Some("rebase:completed");
+    let mut handler = Handler::new(Fake(state.clone()));
+    handler.usb = usb;
+    let frame = handler.execute(ShellCommand::Abort { id: request.id });
+    let Outcome::Partial { payload, .. } = frame.result.outcome else {
+        panic!("partial abort was misreported")
+    };
+    assert_eq!(payload["restart_ready"], false);
+    assert_eq!(payload["aborted"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        handler.usb.session.state(),
+        ControllerState::RecoveryRequired
+    );
+    handler.usb.close().unwrap();
+}

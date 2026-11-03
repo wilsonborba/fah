@@ -55,6 +55,7 @@ impl OperationError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RequestId {
     pub session: u64,
     pub generation: u64,
@@ -233,6 +234,7 @@ pub enum Outcome<T> {
     Pending,
     Completed(T),
     Failed(OperationError),
+    Partial { payload: T, error: OperationError },
 }
 
 #[derive(Debug, Serialize, Deserialize)]

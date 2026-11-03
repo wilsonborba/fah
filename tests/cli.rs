@@ -71,3 +71,9 @@ fn subprocess_shell_help_and_eof_are_json_without_acquisition() {
             .all(|frame| frame["session_state"] == "closed")
     );
 }
+
+#[test]
+fn nested_request_fields_reject_typos_before_execution() {
+    use fah::presentation::cli::commands::parse_line;
+    assert!(parse_line(r#"{"op":"submit","request":{"device":{"session":1,"generation":1,"slot":1},"endpoint":0,"transfer_type":"control","direction":"in","length":0,"setup":{"request_type":128,"request":0,"value":0,"index":0,"length":0,"lenght":99}}}"#).is_err());
+}

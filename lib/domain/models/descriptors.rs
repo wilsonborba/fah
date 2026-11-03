@@ -1,6 +1,7 @@
 //! Bounded descriptor parsing preserves the transport response on parse errors.
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DescriptorRequest {
     pub kind: u8,
     pub index: u8,
