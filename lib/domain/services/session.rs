@@ -28,6 +28,7 @@ pub trait ControllerBackend {
 pub struct Session<B: ControllerBackend> {
     backend: Option<B>,
     state: ControllerState,
+    recovery_revision: Option<u64>,
     pub requests: RequestLedger,
 }
 impl<B: ControllerBackend> Session<B> {
@@ -35,6 +36,7 @@ impl<B: ControllerBackend> Session<B> {
         Self {
             backend: Some(backend),
             state: ControllerState::Closed,
+            recovery_revision: Some(0),
             requests: RequestLedger::new(session_id),
         }
     }
@@ -61,6 +63,7 @@ impl<B: ControllerBackend> Session<B> {
             Err(failure) => {
                 if failure.retained {
                     self.state = ControllerState::RecoveryRequired;
+                    self.bump_recovery_revision();
                 }
                 Err(failure.error)
             }
@@ -78,7 +81,7 @@ impl<B: ControllerBackend> Session<B> {
                 Ok(())
             }
             Err(error) => {
-                self.state = ControllerState::RecoveryRequired;
+                self.recovery_required();
                 Err(error)
             }
         }
@@ -104,6 +107,25 @@ impl<B: ControllerBackend> Session<B> {
     pub fn recovery_required(&mut self) {
         if self.state != ControllerState::Closed {
             self.state = ControllerState::RecoveryRequired;
+            self.bump_recovery_revision();
+        }
+    }
+    fn bump_recovery_revision(&mut self) {
+        self.recovery_revision = self
+            .recovery_revision
+            .and_then(|value| value.checked_add(1));
+    }
+    pub(crate) fn recovery_revision(&self) -> Option<u64> {
+        self.recovery_revision
+    }
+    pub(crate) fn restore_scoped_recovery(&mut self, revision: u64) -> bool {
+        if self.state == ControllerState::RecoveryRequired
+            && self.recovery_revision == Some(revision)
+        {
+            self.state = ControllerState::Initialized;
+            true
+        } else {
+            false
         }
     }
     pub fn close(&mut self) -> Result<(), OperationError> {
@@ -113,7 +135,7 @@ impl<B: ControllerBackend> Session<B> {
         let next_identity = next_session_id()?;
         self.state = ControllerState::Closing;
         if let Err(error) = self.backend.as_mut().unwrap().close() {
-            self.state = ControllerState::RecoveryRequired;
+            self.recovery_required();
             return Err(error);
         }
         // The backend's close contract includes quiescence of every request.
