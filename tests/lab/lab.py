@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 KERNEL = '6.12.95+deb13-amd64'
 MACHINE = 'pc-q35-10.0'
 # Generated VM files and runtime state are build output; completed run evidence is local, untracked documentation.
@@ -99,7 +99,7 @@ def kernel_inputs(kernel_root,expected):
 def prepare(lab,kernel_root=pathlib.Path('/')):
     release_only()
     kernel_root=kernel_root.expanduser().resolve()
-    expected=json.loads((ROOT/'scripts/lab/kernel.json').read_text())
+    expected=json.loads((ROOT/'tests/lab/kernel.json').read_text())
     kernel,config=kernel_inputs(kernel_root,expected)
     info = inventory(lab)
     info['kernel_input_root']=str(kernel_root)
@@ -169,7 +169,7 @@ def prepare(lab,kernel_root=pathlib.Path('/')):
     if not binary.is_file():
         raise ValueError('build the payload first with the pinned toolchain: cargo clean --release && cargo build --locked --release --features hosted-direct')
     executable(binary,'bin/fah')
-    copy_file(ROOT / 'scripts/lab/guest.py', 'guest.py')
+    copy_file(ROOT / 'tests/lab/guest.py', 'guest.py')
     (stage/'restore-modules.json').write_text(json.dumps(modules[initial_count:]))
     init = '''#!/bin/sh
 export PATH=/bin
