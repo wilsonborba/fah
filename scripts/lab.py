@@ -197,7 +197,7 @@ def run(lab, suite):
     qmp_path=run_dir/'qmp.sock'
     trace_path=run_dir/'xhci.trace'
     trace_events=run_dir/'trace-events'
-    trace_events.write_text('\n'.join(['usb_xhci_runtime_write','usb_xhci_oper_write','usb_xhci_irq_msix','usb_xhci_fetch_trb','usb_xhci_slot_enable','usb_xhci_slot_address','usb_xhci_slot_configure','usb_xhci_port_reset','usb_xhci_ep_stop','usb_xhci_ep_reset','usb_xhci_ep_set_dequeue','usb_xhci_xfer_success','usb_xhci_xfer_error','usb_xhci_queue_event'])+'\n')
+    trace_events.write_text('\n'.join(['usb_xhci_port_write','usb_xhci_runtime_write','usb_xhci_oper_write','usb_xhci_irq_msix','usb_xhci_fetch_trb','usb_xhci_slot_enable','usb_xhci_slot_address','usb_xhci_slot_configure','usb_xhci_port_reset','usb_xhci_ep_stop','usb_xhci_ep_reset','usb_xhci_ep_set_dequeue','usb_xhci_xfer_success','usb_xhci_xfer_error','usb_xhci_queue_event'])+'\n')
     args = ['qemu-system-x86_64' , '-machine', MACHINE + ',accel=kvm,kernel-irqchip=split', '-cpu', 'host', '-m', '2048', '-smp', '2', '-nodefaults', '-display', 'none', '-no-reboot', '-serial', 'stdio', '-monitor', 'none', '-kernel', str(lab / 'kernel'), '-initrd', str(lab / 'initramfs.gz'), '-append', 'console=ttyS0 rdinit=/init intel_iommu=on iommu.strict=1 panic=-1 fah_suite=' + suite, '-fw_cfg', 'name=opt/fah-lab,string=' + manifest['run_id'], '-device', 'intel-iommu,intremap=on,caching-mode=on,device-iotlb=on', '-device', 'qemu-xhci,id=xhci,addr=02.0,p2=4,p3=4', '-device','usb-kbd,id=keyboard,bus=xhci.0,port=1','-drive',f'if=none,id=usbdata,format=raw,file={disk}','-device','usb-storage,id=storage,bus=xhci.0,port=2,drive=usbdata','-qmp',f'unix:{qmp_path},server=on,wait=off','-trace',f'events={trace_events},file={trace_path}']
     (run_dir / 'command.json').write_text(json.dumps(args, indent=2))
     result = False
@@ -249,6 +249,15 @@ def run(lab, suite):
             if process.poll() is None:
                 process.kill()
                 process.wait()
+    if suite=='explicit' and result:
+        try:
+            validation=validate_trace(events,trace_path.read_bytes())
+            (run_dir/'trace-validation.json').write_text(json.dumps(validation,indent=2))
+            print(json.dumps({'trace_verified':len(validation)}),flush=True)
+        except Exception as error:
+            result=False
+            (run_dir/'trace-validation.json').write_text(json.dumps({'verified':False,'error':str(error)}))
+            print(json.dumps({'trace_failure':str(error)}),flush=True)
     (run_dir / 'events.json').write_text(json.dumps(events, indent=2))
     (run_dir / 'result.json').write_text(json.dumps({'success': result, 'qemu_exit': process.returncode, 'suite': suite, 'evidence': 'emulated_only'}))
     print(json.dumps({'artifacts': str(run_dir), 'success': result}))
@@ -320,11 +329,51 @@ def manage_run(lab,name,action):
     print(json.dumps({'action':action,'run':name,'active_before':active}))
 
 
+def normalized_trbs(text):
+    result=[]
+    pattern=r'usb_xhci_fetch_trb addr 0x[0-9a-f]+, ([A-Z_]+), p 0x([0-9a-f]+), s 0x([0-9a-f]+), c 0x([0-9a-f]+)'
+    for kind,p,s,c in re.findall(pattern,text):
+        p,s,c=int(p,16),int(s,16),int(c,16)
+        if kind.startswith('CR_'):
+            result.append((kind,c&~1))
+        elif kind=='TR_SETUP':result.append((kind,p,s&0x1ffff,c&~1))
+        elif kind=='TR_DATA':result.append((kind,s&0x1ffff,c&(1<<16)))
+        elif kind=='TR_STATUS':result.append((kind,c&(1<<16)))
+    return result
+
+
+def validate_trace(events,trace):
+    windows={}
+    results=[]
+    for event in events:
+        if event['kind']!='trace_window':continue
+        assert 0<=event['start']<=event['end']<=len(trace),'trace range out of bounds'
+        text=trace[event['start']:event['end']].decode()
+        for forbidden in event.get('forbid',[]):assert forbidden not in text,(event['name'],'unexpected',forbidden)
+        for required in event.get('require',[]):assert required in text,(event['name'],'missing',required)
+        trbs=normalized_trbs(text)
+        if 'command_bit'in event:
+            check=event['command_bit'];commands=[trb for trb in trbs if trb[0]==check['type']]
+            assert len(commands)==1 and bool(commands[0][1]&check['mask'])==check['set'],(event['name'],'command field mismatch',commands)
+        if 'setup_wlength'in event:
+            setups=[trb for trb in trbs if trb[0]=='TR_SETUP']
+            datas=[trb for trb in trbs if trb[0]=='TR_DATA']
+            assert len(setups)==len(datas)==1,'duplicate/replayed control stages'
+            setup,data=setups[0],datas[0]
+            assert setup[1]>>48==event['setup_wlength']and data[1]==event['data_trb_length'],'independent wire/data fields changed'
+        if 'equivalent_to'in event:
+            assert trbs==windows[event['equivalent_to']],(event['name'],'explicit/convenience trace differs',trbs,windows[event['equivalent_to']])
+        windows[event['name']]=trbs
+        results.append({'phase':event['name'],'verified':True,'normalized_trbs':trbs,'physical_capture':False})
+    assert results,'no trace windows recorded'
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['plan', 'prepare', 'run','stop','cleanup'])
     parser.add_argument('--lab', type=pathlib.Path, default=DEFAULT_LAB)
-    parser.add_argument('--suite', choices=['feasibility','fixture','smoke'], default='feasibility')
+    parser.add_argument('--suite', choices=['feasibility','fixture','smoke','explicit'], default='feasibility')
     parser.add_argument('--run',help='single generated run directory name for stop/cleanup')
     args = parser.parse_args()
     lab = safe_lab(args.lab)

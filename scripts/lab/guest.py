@@ -275,10 +275,113 @@ def smoke():
     restore()
 
 
+
+def phase_begin(name):
+    return host_action('phase',phase=name+'_begin')['trace_offset']
+
+
+def phase_end(name,start,**checks):
+    end=host_action('phase',phase=name+'_end')['trace_offset']
+    report('trace_window',name=name,start=start,end=end,**checks)
+
+
+def prepare_explicit(cli,port,configure=True):
+    port=cli.command({'op':'port_reset','port':port})
+    device=cli.command({'op':'slot_enable','port':port['id']})['id']
+    cli.command({'op':'address','device':device})
+    prefix=cli.command({'op':'descriptor','device':device,'request':dict(kind=1,index=0,language=0,length=8)})
+    encoded=prefix['bytes'][7]
+    packet=(1<<encoded)if port['speed_code']in(4,5)else encoded
+    cli.command({'op':'packet_size','device':device,'size':packet})
+    cli.command({'op':'descriptor','device':device,'request':dict(kind=1,index=0,language=0,length=18)})
+    header=cli.command({'op':'descriptor','device':device,'request':dict(kind=2,index=0,language=0,length=9)})
+    length=int.from_bytes(bytes(header['bytes'][2:4]),'little')
+    full=cli.command({'op':'descriptor','device':device,'request':dict(kind=2,index=0,language=0,length=length)})
+    if configure:
+        cli.command({'op':'configuration','device':device,'value':full['bytes'][5]})
+        cli.command({'op':'endpoints','device':device,'interface':0})
+    return device
+
+
+def explicit_behaviors():
+    cli=Cli()
+    try:
+        start=phase_begin('passive')
+        cli.command({'op':'open','target':BDF})
+        invalid=cli.raw({'op':'ports'})
+        assert invalid['outcome']['status']=='failed'
+        cli.command({'op':'init'})
+        ports=cli.command({'op':'ports'})
+        cli.command({'op':'state'})
+        phase_end('passive',start,forbid=['TR_SETUP','CR_ENABLE_SLOT','CR_ADDRESS_DEVICE','CR_CONFIGURE_ENDPOINT','usb_xhci_port_write'])
+        port=next(port for port in ports if port['connected']and port['speed_code']==4)
+        stale=port['id']
+        start=phase_begin('chosen_reset')
+        port=cli.command({'op':'port_reset','port':port['id']})
+        phase_end('chosen_reset',start,require=['usb_xhci_port_reset port 2, warm 0'],forbid=['TR_SETUP','CR_ADDRESS_DEVICE','CR_ENABLE_SLOT'])
+        start=phase_begin('slot')
+        device=cli.command({'op':'slot_enable','port':port['id']})['id']
+        phase_end('slot',start,require=['CR_ENABLE_SLOT'],forbid=['TR_SETUP','CR_ADDRESS_DEVICE'])
+        start=phase_begin('bsr')
+        cli.command({'op':'address','device':device,'bsr':True})
+        phase_end('bsr',start,require=['CR_ADDRESS_DEVICE'],forbid=['TR_SETUP'],command_bit={'type':'CR_ADDRESS_DEVICE','mask':512,'set':True})
+        start=phase_begin('descriptor_at_default')
+        descriptor=cli.command({'op':'descriptor','device':device,'request':dict(kind=1,index=0,language=0,length=8)})
+        assert descriptor['bytes'][0:2]==[18,1]
+        phase_end('descriptor_at_default',start,require=['TR_SETUP','TR_DATA','TR_STATUS'],forbid=['CR_CONFIGURE_ENDPOINT'])
+        start=phase_begin('assigned_address')
+        cli.command({'op':'address','device':device,'bsr':False})
+        phase_end('assigned_address',start,require=['CR_ADDRESS_DEVICE'],forbid=['TR_SETUP'],command_bit={'type':'CR_ADDRESS_DEVICE','mask':512,'set':False})
+        start=phase_begin('compatibility_plan')
+        plan=dict(device=device,profile='device_compatibility',setup=dict(request_type=128,request=6,value=256,index=0,length=8),data_stage=dict(direction='in',length=18),status_direction='out',data=[])
+        request=cli.command({'op':'control_plan','plan':plan})
+        event=cli.await_request(request['id'])
+        assert event['outcome']['status']=='completed',event
+        value=event['outcome']['payload']
+        assert value['state']['actual_length']==8 and value['data'][0:2]==[18,1],value
+        cli.command({'op':'reclaim','id':request['id']})
+        phase_end('compatibility_plan',start,require=['TR_SETUP','TR_DATA','TR_STATUS'],setup_wlength=8,data_trb_length=18)
+        start=phase_begin('negative_capabilities')
+        plan['status_direction']=None
+        rejected=cli.raw({'op':'control_plan','plan':plan})
+        assert rejected['outcome']['status']=='failed'and rejected['outcome']['payload']['category']=='unsupported'
+        for capability in ['arbitrary_data_pid','direct_dpdm','split_control_transaction']:
+            rejected=cli.raw({'op':'unsupported','capability':capability})
+            assert rejected['outcome']['status']=='failed'and rejected['outcome']['payload']['category']=='unsupported'
+        assert cli.raw({'op':'port_reset','port':stale})['outcome']['status']=='failed'
+        phase_end('negative_capabilities',start,forbid=['TR_SETUP','CR_ENABLE_SLOT','CR_ADDRESS_DEVICE','usb_xhci_port_write'])
+        start=phase_begin('noop')
+        result=cli.command({'op':'noop'})
+        assert result['completion_code']==1
+        phase_end('noop',start,require=['CR_NOOP'])
+        cli.command({'op':'close'})
+        cli.command({'op':'open','target':BDF});cli.command({'op':'init'})
+        port=next(port for port in cli.command({'op':'ports'})if port['connected']and port['speed_code']==4)
+        start=phase_begin('equivalent_explicit')
+        prepare_explicit(cli,port['id'])
+        phase_end('equivalent_explicit',start)
+        cli.command({'op':'close'})
+        cli.command({'op':'open','target':BDF});cli.command({'op':'init'})
+        port=next(port for port in cli.command({'op':'ports'})if port['connected']and port['speed_code']==4)
+        start=phase_begin('equivalent_convenience')
+        cli.command({'op':'enumerate','port':port['id'],'configure':True})
+        phase_end('equivalent_convenience',start,equivalent_to='equivalent_explicit')
+        cli.command({'op':'close'});cli.command({'op':'quit'});cli.process.wait(timeout=10)
+        assert cli.process.returncode==1,'negative commands must set nonzero exit status'
+        report('explicit_behavior',bsr=True,compatibility_header=8,compatibility_buffer=18,compatibility_actual=8,no_implicit_enumeration=True,negative_cases=True)
+    finally:
+        if cli.process.poll()is None:
+            try:cli.command({'op':'close'});cli.command({'op':'quit'});cli.process.wait(timeout=10)
+            except BaseException as error:report('cleanup_failure',error=repr(error))
+    restore()
+
+
 def main():
     report('start', suite=sys.argv[1], run_id=pathlib.Path('/run-id').read_text())
     metadata()
-    if sys.argv[1]=='smoke':
+    if sys.argv[1]=='explicit':
+        explicit_behaviors()
+    elif sys.argv[1]=='smoke':
         smoke()
     elif sys.argv[1]=='fixture':
         restore()
