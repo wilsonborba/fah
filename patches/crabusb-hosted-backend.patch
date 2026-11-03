@@ -96,7 +96,7 @@ index 71b939e..4ab690c 100644
 -    }
 -}
 diff --git a/usb-host/src/backend/kmod/mod.rs b/usb-host/src/backend/kmod/mod.rs
-index e17466d..0ab8707 100644
+index e17466d..8d78520 100644
 --- a/usb-host/src/backend/kmod/mod.rs
 +++ b/usb-host/src/backend/kmod/mod.rs
 @@ -50,3 +50,145 @@ pub struct DeviceAddressInfo {
@@ -118,7 +118,7 @@ index e17466d..0ab8707 100644
 +        Ok(Self {core:Xhci::new(mmio,kernel)?,devices:BTreeMap::new()})
 +    }
 +    pub async fn initialize(&mut self)->Result<()> {self.core.init().await}
-+    /// Called after reset and ring programming, immediately before Run/Stop.
++    /// Called after confirmed reset, before DMA-fetching register programming.
 +    pub async fn initialize_with_dma_hook(&mut self,before_start:impl FnOnce()->Result<()>+Send)->Result<()> {
 +        self.core.init_with_dma_hook(before_start).await
 +    }
@@ -975,7 +975,7 @@ index 27eeae2..f31f85e 100644
 +
 +}
 diff --git a/usb-host/src/backend/kmod/xhci/host.rs b/usb-host/src/backend/kmod/xhci/host.rs
-index 243859e..4aea6f4 100644
+index 243859e..263b3cd 100644
 --- a/usb-host/src/backend/kmod/xhci/host.rs
 +++ b/usb-host/src/backend/kmod/xhci/host.rs
 @@ -141,7 +141,8 @@ impl Xhci {
@@ -988,14 +988,16 @@ index 243859e..4aea6f4 100644
          self.disable_irq();
          // 4.2 Host Controller Initialization
          self.init_ext_caps().await?;
-@@ -173,6 +174,7 @@ impl Xhci {
-         // (5.4.8) will begin reporting device connects, etc., and system software may begin
-         // enumerating devices. System software may follow the procedures described in
-         // section 4.3, to enumerate attached devices.
-+        before_start()?;
-         self.start();
-         mb();
+@@ -151,6 +152,9 @@ impl Xhci {
+         self.chip_hardware_reset().await?;
  
+         self.disable_irq();
++        // ERSTBA programming itself may fetch DMA before Run/Stop. Grant
++        // permission only after confirmed reset, before any DMA register setup.
++        before_start()?;
+ 
+         // Program the Max Device Slots Enabled (MaxSlotsEn) field in the CONFIG
+         // register (5.4.7) to enable the device slots that system software is going to
 diff --git a/usb-host/src/backend/kmod/xhci/mod.rs b/usb-host/src/backend/kmod/xhci/mod.rs
 index 8c82dc7..0a1169d 100644
 --- a/usb-host/src/backend/kmod/xhci/mod.rs
