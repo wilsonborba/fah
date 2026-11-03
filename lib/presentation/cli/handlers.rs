@@ -7,7 +7,7 @@ use crate::domain::{
 use serde_json::{Value, json};
 pub struct Handler<B: ExplicitBackend> {
     pub usb: UsbSession<B>,
-    sequence: u64,
+    pub(super) sequence: u64,
     pub quitting: bool,
     waits: std::collections::BTreeMap<u64, (crate::domain::models::RequestId, std::time::Instant)>,
 }
@@ -130,6 +130,17 @@ impl<B: ExplicitBackend> Handler<B> {
                 Ok(json!({"closed":true}))
             }
 
+            ShellCommand::Batch {
+                operations,
+                preview,
+            } => self.batch(operations, preview),
+            ShellCommand::Enumerate {
+                port,
+                configuration_index,
+                configure,
+                interface,
+                alternate,
+            } => self.enumerate(port, configuration_index, configure, interface, alternate),
             ShellCommand::Devices => {
                 Ok(json!({"cached":true,"devices":self.usb.device_snapshots()}))
             }

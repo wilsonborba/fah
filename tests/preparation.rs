@@ -157,9 +157,15 @@ use fah::domain::models::descriptors::DescriptorRequest;
 impl ConfigurationBackend for Fake {
     fn descriptor(&mut self, _: u8, request: DescriptorRequest) -> Result<Vec<u8>, OperationError> {
         self.effect(&format!("descriptor:{}", request.length))?;
-        let bytes = vec![
-            9, 2, 25, 0, 1, 2, 0, 128, 50, 9, 4, 0, 0, 1, 3, 0, 0, 0, 7, 5, 129, 3, 8, 0, 10,
-        ];
+        let bytes = if request.kind == 1 {
+            vec![
+                18, 1, 0, 2, 0, 0, 0, 8, 0x34, 0x12, 0x78, 0x56, 0, 1, 0, 0, 0, 1,
+            ]
+        } else {
+            vec![
+                9, 2, 25, 0, 1, 2, 0, 128, 50, 9, 4, 0, 0, 1, 3, 0, 0, 0, 7, 5, 129, 3, 8, 0, 10,
+            ]
+        };
         Ok(bytes[..bytes.len().min(request.length as usize)].to_vec())
     }
     fn ep0_packet_size(&mut self, _: u8, size: u16) -> Result<(), OperationError> {
@@ -817,5 +823,129 @@ fn cli_abort_reports_partial_progress_instead_of_success() {
         handler.usb.session.state(),
         ControllerState::RecoveryRequired
     );
+    handler.usb.close().unwrap();
+}
+
+#[test]
+fn convenience_enumeration_matches_explicit_steps_and_reports_failure_prefix() {
+    use fah::domain::models::Outcome;
+    use fah::presentation::cli::{commands::ShellCommand, handlers::Handler};
+    let (usb, state) = fixture();
+    let mut handler = Handler::new(Fake(state.clone()));
+    handler.usb = usb;
+    let port = handler.usb.inspect_ports().unwrap()[0].id;
+    let frame = handler.execute(ShellCommand::Enumerate {
+        port,
+        configuration_index: 0,
+        configure: true,
+        interface: 0,
+        alternate: 0,
+    });
+    let Outcome::Completed(value) = frame.result.outcome else {
+        panic!("enumeration failed")
+    };
+    assert_eq!(value["steps"].as_array().unwrap().len(), 11);
+    assert_eq!(value["configured"], true);
+    let effects: Vec<_> = state
+        .lock()
+        .unwrap()
+        .trace
+        .iter()
+        .filter(|step| step.as_str() != "read")
+        .cloned()
+        .collect();
+    assert_eq!(
+        effects,
+        [
+            "acquire",
+            "init-controller",
+            "reset",
+            "enable-slot",
+            "address:normal",
+            "descriptor:8",
+            "ep0:8",
+            "descriptor:18",
+            "descriptor:9",
+            "descriptor:25",
+            "configuration:2",
+            "endpoints:0:0"
+        ]
+    );
+    handler.usb.close().unwrap();
+    let (usb, state) = fixture();
+    let mut handler = Handler::new(Fake(state.clone()));
+    handler.usb = usb;
+    let port = handler.usb.inspect_ports().unwrap()[0].id;
+    state.lock().unwrap().fail = Some("descriptor:18");
+    let frame = handler.execute(ShellCommand::Enumerate {
+        port,
+        configuration_index: 0,
+        configure: true,
+        interface: 0,
+        alternate: 0,
+    });
+    let Outcome::Partial { payload, .. } = frame.result.outcome else {
+        panic!("missing partial result")
+    };
+    assert_eq!(payload["failed_operation"], "device_descriptor");
+    assert_eq!(payload["steps"].as_array().unwrap().len(), 6);
+    assert!(
+        !state
+            .lock()
+            .unwrap()
+            .trace
+            .iter()
+            .any(|op| op.starts_with("configuration:"))
+    );
+    handler.usb.close().unwrap();
+}
+#[test]
+fn ordered_batch_stops_on_failure_and_retains_outstanding_requests() {
+    use fah::domain::models::Outcome;
+    use fah::presentation::cli::{commands::ShellCommand, handlers::Handler};
+    let (usb, state, device) = addressed();
+    let mut handler = Handler::new(Fake(state.clone()));
+    handler.usb = usb;
+    let before = state.lock().unwrap().trace.len();
+    let preview = handler.execute(ShellCommand::Batch {
+        operations: vec![ShellCommand::Submit {
+            request: control(device, 8),
+        }],
+        preview: true,
+    });
+    assert!(matches!(preview.result.outcome, Outcome::Completed(_)));
+    assert_eq!(state.lock().unwrap().trace.len(), before);
+    let frame = handler.execute(ShellCommand::Batch {
+        operations: vec![
+            ShellCommand::Submit {
+                request: control(device, 8),
+            },
+            ShellCommand::Unsupported {
+                capability: "direct_dpdm".into(),
+            },
+            ShellCommand::Close,
+        ],
+        preview: false,
+    });
+    let Outcome::Partial { payload, .. } = frame.result.outcome else {
+        panic!("batch failed to report prefix")
+    };
+    assert_eq!(payload["operations"].as_array().unwrap().len(), 2);
+    assert_eq!(payload["outstanding_requests"].as_array().unwrap().len(), 1);
+    assert_eq!(state.lock().unwrap().pending.len(), 1);
+    assert_eq!(handler.usb.session.state(), ControllerState::Initialized);
+    let before = state.lock().unwrap().trace.len();
+    assert!(
+        handler
+            .dispatch(ShellCommand::Batch {
+                operations: vec![ShellCommand::Batch {
+                    operations: vec![],
+                    preview: false
+                }],
+                preview: false
+            })
+            .is_err()
+    );
+    assert_eq!(state.lock().unwrap().trace.len(), before);
     handler.usb.close().unwrap();
 }

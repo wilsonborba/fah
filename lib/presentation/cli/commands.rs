@@ -57,6 +57,22 @@ pub enum ShellCommand {
     Init,
     Close,
     Quit,
+    Batch {
+        operations: Vec<ShellCommand>,
+        #[serde(default)]
+        preview: bool,
+    },
+    Enumerate {
+        port: crate::domain::models::ports::PortId,
+        #[serde(default)]
+        configuration_index: u8,
+        #[serde(default)]
+        configure: bool,
+        #[serde(default)]
+        interface: u8,
+        #[serde(default)]
+        alternate: u8,
+    },
     Ports,
     Devices,
     Requests,
