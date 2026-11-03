@@ -4,6 +4,7 @@ use std::ffi::OsString;
 pub enum Command {
     Help,
     Version,
+    Capabilities,
     Shell { json: bool, run_id: String },
 }
 
@@ -37,6 +38,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, &'stat
         None if first.is_none() => Ok(Command::Help),
         Some("--help" | "-h" | "help") => Ok(Command::Help),
         Some("--version" | "-V" | "version") => Ok(Command::Version),
+        Some("capabilities") => Ok(Command::Capabilities),
         _ => Err("unknown command; use --help"),
     }
 }
