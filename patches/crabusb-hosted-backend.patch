@@ -343,7 +343,7 @@ index 900eaad..ab5ca53 100644
          match self {
              ContextData::Context32(ctx) => ctx.out.dma_addr(),
 diff --git a/usb-host/src/backend/kmod/xhci/device.rs b/usb-host/src/backend/kmod/xhci/device.rs
-index a7996fc..6e40828 100644
+index a7996fc..38ddfe3 100644
 --- a/usb-host/src/backend/kmod/xhci/device.rs
 +++ b/usb-host/src/backend/kmod/xhci/device.rs
 @@ -159,30 +159,108 @@ impl Device {
@@ -471,7 +471,7 @@ index a7996fc..6e40828 100644
          // 直接使用 DeviceSpeed 枚举计算默认 max packet size
          let max_packet_size = parse_default_max_packet_size_from_port_speed(info.port_speed);
  
-@@ -204,9 +282,9 @@ impl Device {
+@@ -204,9 +282,10 @@ impl Device {
              parent_id = parent_hub.parent;
          }
  
@@ -480,18 +480,17 @@ index a7996fc..6e40828 100644
              .control_endpoint_mut()
 -            .with_raw_mut::<XhciEndpoint, _>(|ep| ep.bus_addr());
 +            .with_raw_mut::<XhciEndpoint, _>(|ep| ep.idle_dequeue())?;
++        let dequeue_words=explicit_endpoint_dequeue_words(ctrl_ring_addr.raw(),ring_cycle_bit)?;
          // ctrl dci
          let dci = Dci::CTRL;
          // 1. Allocate an Input Context data structure (6.2.5) and initialize all fields to
-@@ -287,16 +365,10 @@ impl Device {
+@@ -287,16 +366,11 @@ impl Device {
              endpoint_0.set_max_packet_size(max_packet_size);
              // • Max Burst Size = 0.
              endpoint_0.set_max_burst_size(0);
 -            // • TR Dequeue Pointer = Start address of first segment of the Default Control
 -            //   Endpoint Transfer Ring.
-+            // Preserve the empty ring position after BSR/default-address traffic.
-+            // Reusing its base would replay old TDs and reclaimed DMA mappings.
-             endpoint_0.set_tr_dequeue_pointer(ctrl_ring_addr.raw());
+-            endpoint_0.set_tr_dequeue_pointer(ctrl_ring_addr.raw());
 -            // • Dequeue Cycle State (DCS) = 1. Reflects Cycle bit state for valid TRBs written
 -            //   by software.
 -            // if ring_cycle_bit {
@@ -499,11 +498,15 @@ index a7996fc..6e40828 100644
 -            // } else {
 -            //     endpoint_0.clear_dequeue_cycle_state();
 -            // }
-+            if ring_cycle_bit {endpoint_0.set_dequeue_cycle_state();}else{endpoint_0.clear_dequeue_cycle_state();}
++            // Preserve the empty ring position after BSR/default-address traffic.
++            // Reusing its base would replay old TDs and reclaimed DMA mappings.
++            // xhci0.9.2's setter incorrectly demands64-byte alignment. These
++            // CPU-local context words encode the spec's16-byte pointer and DCS.
++            endpoint_0.as_mut()[2]=dequeue_words[0];endpoint_0.as_mut()[3]=dequeue_words[1];
              // • Interval = 0.
              endpoint_0.set_interval(0);
              // • Max Primary Streams (MaxPStreams) = 0.
-@@ -329,11 +401,7 @@ impl Device {
+@@ -329,11 +403,7 @@ impl Device {
          let input_bus_addr = self.ctx.input_bus_addr();
          trace!("Input context bus address: {input_bus_addr:#x?}");
          let result = host
@@ -516,7 +519,7 @@ index a7996fc..6e40828 100644
              .await?;
  
          debug!("Address slot ok {result:x?}");
-@@ -348,12 +416,10 @@ impl Device {
+@@ -348,12 +418,10 @@ impl Device {
      async fn get_device_descriptor_base(&mut self) -> Result<DeviceDescriptorBase> {
          let mut data = vec![0u8; 8];
  
@@ -533,7 +536,7 @@ index a7996fc..6e40828 100644
  
          Ok(desc)
      }
-@@ -528,7 +594,7 @@ impl Device {
+@@ -528,7 +596,7 @@ impl Device {
              input
                  .device_mut()
                  .slot_mut()
@@ -542,7 +545,7 @@ index a7996fc..6e40828 100644
          });
          mb();
  
-@@ -765,3 +831,84 @@ impl DeviceOp for Device {
+@@ -765,3 +833,90 @@ impl DeviceOp for Device {
          self.update_hub_inner(params).boxed()
      }
  }
@@ -627,6 +630,12 @@ index a7996fc..6e40828 100644
 +    if preserve {cmd.set_transfer_state_preserve();}cmd.into()
 +}
 +#[cfg(test)]mod reset_encoding {use super::*;#[test]fn preserve_changes_only_tsp(){let clear=explicit_reset_command(3,7,false).into_raw();let keep=explicit_reset_command(3,7,true).into_raw();assert_eq!(clear[3]>>24,3);assert_eq!((clear[3]>>16)&31,7);assert_eq!(keep[3]^clear[3],1<<9);assert_eq!(clear[3]&(1<<9),0);}}
++
++fn explicit_endpoint_dequeue_words(pointer:u64,cycle:bool)->Result<[u32;2]>{
++    if pointer&15!=0{return Err(USBError::InvalidParameter);}
++    Ok([(pointer as u32)|u32::from(cycle),(pointer>>32)as u32])
++}
++#[cfg(test)]mod dequeue_alignment{use super::*;#[test]fn trb_alignment_and_cycle_are_preserved(){assert_eq!(explicit_endpoint_dequeue_words(0x123400010030,true).unwrap(),[0x10031,0x1234]);assert_eq!(explicit_endpoint_dequeue_words(0x10030,false).unwrap(),[0x10030,0]);assert!(explicit_endpoint_dequeue_words(0x10031,false).is_err());}}
 diff --git a/usb-host/src/backend/kmod/xhci/endpoint.rs b/usb-host/src/backend/kmod/xhci/endpoint.rs
 index 5c11453..b6d1665 100644
 --- a/usb-host/src/backend/kmod/xhci/endpoint.rs
