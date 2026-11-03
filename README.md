@@ -386,3 +386,32 @@ validation. Remaining gates are [isolated target #32](https://github.com/wilsonb
 FAH is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE).
 Dependencies retain their own licenses. Modified source patches and release packages
 must carry their applicable upstream notices; dependency updates require renewed review.
+
+
+## Build a versioned preview candidate
+
+`python3 scripts/release.py audit` checks the locked normal/build dependency graph,
+preserved upstream texts and reviewed omissions; `--write-notices` regenerates
+`THIRD_PARTY_NOTICES.md`. The candidate includes the full license texts, modification
+notice, source snapshot, patches, checksums and dependency provenance. See
+[third-party notices](THIRD_PARTY_NOTICES.md) and [modifications](NOTICE).
+
+On the clean release, after rebuilding/preparing and passing the six required fresh
+runs, package their exact generated directories:
+
+```text
+python3 scripts/release.py candidate --evidence <feasibility-run> --evidence <fixture-run> --evidence <smoke-run-1> --evidence <smoke-run-2> --evidence <explicit-run> --evidence <faults-run>
+```
+
+Each evidence argument is an absolute path under the generated lab runs. Packaging
+requires the same source commit and executable hash as every selected run. It verifies
+the eleven trace windows/failure rows and refuses failed, stale or incomplete evidence.
+Artifacts default to `~/.cache/fah-release/`; `SHA256SUMS`, sidecar archive checksum,
+`provenance.json`, `dependency-licenses.json` and `RELEASE-NOTES.md` are included.
+The binary is tested for the recorded Linux/userspace/toolchain; arbitrary-host byte
+identity or ABI compatibility is not promised.
+
+Regenerate the changelog with `git-cliff --tag v0.1.0 --output CHANGELOG.md` using
+git-cliff2.10.1. The packaging tool never merges, tags or publishes. Final main/tag
+promotion follows the explicitly authorized release workflow after guest validation;
+publication of a hosted release remains a separate action.

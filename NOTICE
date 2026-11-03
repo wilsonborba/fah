@@ -1,0 +1,22 @@
+FAH — explicit USB host-controller research
+Copyright (c) 2026 FAH contributors
+Licensed under MIT OR Apache-2.0 at the recipient's option.
+
+This project maintains modifications to:
+- CrabUSB crab-usb0.9.1 and usb-if0.7.0 at
+  e83b56b0672460b400105f3855222af58c03af87 (MIT).
+- dma-api0.7.3, registry archive SHA256
+  6ce802d0c429c6966bea151e8e78eb5906d5b5e2cdebd0e960097cbe3654a3db
+  (Apache-2.0; published VCS4b0046b041082d16e2befc8d6035ab63796e0b14).
+
+The maintained patches identify all source changes. They add hosted explicit
+operations, reviewed mapped-memory access, synchronization, scoped DMA ownership,
+command completion validation and conservative recovery/teardown. Each changed
+dma-api file carries a prominent modification notice. xhci0.9.2 is unmodified;
+the reviewed context-encoding workaround is within the CrabUSB patch.
+
+Upstream copyrights/licenses are retained in the candidate's licenses directory
+and dependency-license manifest. THIRD_PARTY_NOTICES.md lists the resolved
+normal/build graph. Reviewed text fallbacks for incomplete published archives are
+recorded in assets/licenses/fallbacks.json; supplied standard license text is
+explicitly distinguished from an upstream-published file.
