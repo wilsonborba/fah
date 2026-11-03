@@ -2,5 +2,27 @@
   "version": "6.12.95+deb13-amd64",
   "kernel_sha256": "251a0bc71561054dec560f522904b0861f5b1ffa403b3459ee2db910d629cae9",
   "config_sha256": "5b75efc64d382368ac963e847d734e49fa6ea9c711a5d4441aaf65fee65b6431",
-  "source": "Debian linux-image-6.12.95+deb13-amd64 installed package; copied unmodified for isolated guest"
+  "source": "Debian linux-image-6.12.95+deb13-amd64 6.12.95-1; official package SHA256 plus kernel/config/selected-module fingerprints; installed or privately extracted inputs",
+  "package": "linux-image-6.12.95+deb13-amd64",
+  "package_version": "6.12.95-1",
+  "deb_url": "https://security.debian.org/debian-security/pool/updates/main/l/linux-signed-amd64/linux-image-6.12.95+deb13-amd64_6.12.95-1_amd64.deb",
+  "deb_sha256": "5daee28d4837901ab400d778dfcd3c6d9281a9ff580d8872a94a661c6b39c717",
+  "module_sha256": {
+    "kernel/drivers/firmware/qemu_fw_cfg.ko.xz": "56bfcb5d9dc6d0e715c70d50ad7fd98894719ad6df0a630005791e268b9a6010",
+    "kernel/drivers/hid/hid.ko.xz": "3d497ac83a47a3400e9adfa23d15b91793c0f895a505f18f655282b9aa1bc6ae",
+    "kernel/drivers/hid/usbhid/usbhid.ko.xz": "9c0a5073f2c0bd84d676eff906f70796f7b023520d0293c8a61c6421631cbe8f",
+    "kernel/drivers/scsi/scsi_common.ko.xz": "66cf27083ac2f6a0f4ad7bc5d06e0ed4ed7e3e1f1890f3668d6de92d61343fa4",
+    "kernel/drivers/scsi/scsi_mod.ko.xz": "9a07c548a616eb5c9fb39cb2f028f620023af758797832c7a82856c4b91fff14",
+    "kernel/drivers/scsi/sd_mod.ko.xz": "c3ece1e39f64d19ccb4fdbb974886eb996152d0cc85a3303bfa8bd971e2c5a77",
+    "kernel/drivers/usb/common/usb-common.ko.xz": "e4836fa871163d06adc6306352dc72fac9e37ae1374faac002f8fe2a08c93039",
+    "kernel/drivers/usb/core/usbcore.ko.xz": "4420ec27a20e986bd25b6d94dea321a24895810c6fb16e3ddbba72edc8b49064",
+    "kernel/drivers/usb/host/xhci-hcd.ko.xz": "acf6fd19204d4c001879ffd037283e4ad9773e3207fc3ce38fe0a454e7c6fbcf",
+    "kernel/drivers/usb/host/xhci-pci.ko.xz": "c04cac9abbb09b0c1fc81104c96a3dd5abb7d0164c6fc4822d00d9d7e2936a7d",
+    "kernel/drivers/usb/storage/usb-storage.ko.xz": "9b8c4469165bc00b3c07bed6efb3fb6f5feb580b606e5f84cd68e83871ec7500",
+    "kernel/drivers/vfio/pci/vfio-pci-core.ko.xz": "4f34ef5140a23e6f31656afb58fe168f3fa8f5c9b230b13e779f1f6110b452e7",
+    "kernel/drivers/vfio/pci/vfio-pci.ko.xz": "16dbae01fd605408a828e45028f3cf56d488fcf089ca2f15a8386030a3b56f29",
+    "kernel/drivers/vfio/vfio.ko.xz": "519c960d62be36d9a4b29f5d05182c83f8376b80b02111a1c65ab40214d60956",
+    "kernel/drivers/vfio/vfio_iommu_type1.ko.xz": "076d8879d0beb06ca50e162c441601bc76dda5a0278414483c36301f1b0d00f4",
+    "kernel/virt/lib/irqbypass.ko.xz": "d68057a8e2f732d370a9b13b886f94d8615472e516b08f290ea6636e853676dd"
+  }
 }
