@@ -37,6 +37,7 @@ struct Allocation {
     layout: Layout,
     lease: Lease,
     retired: bool,
+    streaming: bool,
 }
 struct State {
     allocator: IovaAllocator,
@@ -76,10 +77,22 @@ impl<P: MappingProvider> DmaAdapter<P> {
     pub fn last_error(&self) -> Option<String> {
         self.state.lock().unwrap().error.clone()
     }
-    fn allocate(&self, size: usize, alignment: usize, mask: u64) -> Result<(usize, u64), String> {
-        if size == 0 || !alignment.is_power_of_two() {
-            return Err("invalid allocation layout".into());
+    fn allocate(
+        &self,
+        size: usize,
+        alignment: usize,
+        mask: u64,
+        streaming: bool,
+    ) -> Result<(usize, u64), String> {
+        if size == 0 || size > 65536 || !alignment.is_power_of_two() {
+            return Err(
+                "single-segment allocation must be 1..=65536 bytes with power-of-two alignment"
+                    .into(),
+            );
         }
+        // This backend uses one segment/TRB for these allocations. A 64KiB
+        // device alignment prevents data and ring segments crossing a boundary.
+        let alignment = alignment.max(65536);
         let rounded = size
             .checked_add(self.page_size - 1)
             .ok_or("size overflow")?
@@ -128,6 +141,7 @@ impl<P: MappingProvider> DmaAdapter<P> {
                 layout,
                 lease,
                 retired: false,
+                streaming,
             },
         );
         Ok((cpu as usize, lease.iova))
@@ -147,30 +161,82 @@ impl<P: MappingProvider> DmaAdapter<P> {
     /// A software cancellation flag is insufficient evidence.
     pub unsafe fn reclaim_retired_after_quiescence(&self) -> Result<(), String> {
         let mut state = self.state.lock().map_err(|_| "DMA state poisoned")?;
-        let retired: Vec<u64> = state
+        let leases: Vec<_> = state
             .allocations
-            .iter()
-            .filter(|(_, a)| a.retired)
-            .map(|(k, _)| *k)
+            .values()
+            .filter(|a| a.retired)
+            .map(|a| a.lease)
             .collect();
-        for iova in retired {
-            let a = state.allocations.get(&iova).unwrap();
-            let (lease, cpu, layout) = (a.lease, a.cpu, a.layout);
-            if let Err(e) = self.provider.unmap(iova, layout.size()) {
-                state.error = Some(e.clone());
-                return Err(e);
+        for lease in leases {
+            unsafe {
+                self.reclaim_one(&mut state, lease)?;
             }
-            state
-                .allocator
-                .quiesced(lease)
-                .map_err(|e| format!("{e:?}"))?;
-            state
-                .allocator
-                .release(lease, true)
-                .map_err(|e| format!("{e:?}"))?;
-            state.allocations.remove(&iova);
-            // SAFETY: Caller established quiescence and unmap has succeeded.
-            unsafe { dealloc(cpu as *mut u8, layout) };
+        }
+        Ok(())
+    }
+    /// Metadata token for the current mapping, not proof of quiescence.
+    pub fn mapping_lease(&self, iova: u64) -> Option<Lease> {
+        self.state
+            .lock()
+            .ok()?
+            .allocations
+            .get(&iova)
+            .map(|a| a.lease)
+    }
+    pub fn allocation_epoch(&self) -> u64 {
+        self.state
+            .lock()
+            .unwrap()
+            .allocations
+            .values()
+            .map(|a| a.lease.id)
+            .max()
+            .unwrap_or(0)
+    }
+    /// Select only newly allocated streaming maps dropped since this operation
+    /// began. Concurrent IRQ processing allocates/frees no DMA storage.
+    pub fn retired_streaming_since(&self, epoch: u64) -> Vec<Lease> {
+        self.state
+            .lock()
+            .unwrap()
+            .allocations
+            .values()
+            .filter(|a| a.streaming && a.retired && a.lease.id > epoch)
+            .map(|a| a.lease)
+            .collect()
+    }
+    /// # Safety
+    /// This exact current lease must be quiescent with no remaining pointer
+    /// users. A stale token, timeout or cancellation does not establish this.
+    pub unsafe fn reclaim_lease_after_quiescence(&self, lease: Lease) -> Result<(), String> {
+        let mut state = self.state.lock().map_err(|_| "DMA state poisoned")?;
+        unsafe { self.reclaim_one(&mut state, lease) }
+    }
+    unsafe fn reclaim_one(&self, state: &mut State, lease: Lease) -> Result<(), String> {
+        let a = state
+            .allocations
+            .get(&lease.iova)
+            .ok_or("unknown DMA lease")?;
+        if a.lease != lease || !a.retired {
+            return Err("stale or unretired DMA lease".into());
+        }
+        let (cpu, layout) = (a.cpu, a.layout);
+        if let Err(error) = self.provider.unmap(lease.iova, layout.size()) {
+            state.error = Some(error.clone());
+            return Err(error);
+        }
+        state
+            .allocator
+            .quiesced(lease)
+            .map_err(|e| format!("{e:?}"))?;
+        state
+            .allocator
+            .release(lease, true)
+            .map_err(|e| format!("{e:?}"))?;
+        state.allocations.remove(&lease.iova);
+        // SAFETY: caller proved current-lease quiescence and unmap succeeded.
+        unsafe {
+            dealloc(cpu as *mut u8, layout);
         }
         Ok(())
     }
@@ -190,7 +256,7 @@ mod integration {
             self.page_size
         }
         unsafe fn alloc_coherent(&self, mask: u64, layout: Layout) -> Option<DmaHandle> {
-            match self.allocate(layout.size(), layout.align(), mask) {
+            match self.allocate(layout.size(), layout.align(), mask, false) {
                 Ok((cpu, iova)) => Some(unsafe {
                     DmaHandle::new(NonNull::new(cpu as *mut u8)?, DmaAddr::from(iova), layout)
                 }),
@@ -213,7 +279,7 @@ mod integration {
         ) -> Result<DmaMapHandle, DmaError> {
             // Always bounce. Arbitrary user buffers may share unaligned pages.
             let layout = Layout::from_size_align(size.get(), align)?;
-            let (cpu, iova) = self.allocate(size.get(), align, mask).map_err(|e| {
+            let (cpu, iova) = self.allocate(size.get(), align, mask, true).map_err(|e| {
                 self.record(e);
                 DmaError::NoMemory
             })?;

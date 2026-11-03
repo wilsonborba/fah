@@ -6,6 +6,7 @@ pub struct ControllerSnapshot {
     pub target: Option<String>,
     pub interrupt_mode: Option<String>,
     pub retained_allocations: usize,
+    pub close_stage: Option<String>,
 }
 /// An acquire error states whether any resources with uncertain ownership remain.
 pub struct AcquisitionFailure {
@@ -17,7 +18,9 @@ pub trait ControllerBackend {
     fn initialize(&mut self) -> Result<(), OperationError>;
     /// Pure inspection: must not enumerate, reset, address or configure.
     fn inspect(&self) -> ControllerSnapshot;
-    /// Success means DMA is quiescent, interrupts stopped, mappings released.
+    /// Success means owned FAH DMA is quiescent, workers stopped and mappings
+    /// released. With no FAH allocation/publication, ownership can be released
+    /// without asserting the prior foreign engine was initialized by FAH.
     fn close(&mut self) -> Result<(), OperationError>;
 }
 /// Not Clone; all effects require exclusive access to this owner. Resource Drop
@@ -34,6 +37,9 @@ impl<B: ControllerBackend> Session<B> {
             state: ControllerState::Closed,
             requests: RequestLedger::new(session_id),
         }
+    }
+    pub fn identity(&self) -> u64 {
+        self.requests.session_id()
     }
     pub fn state(&self) -> ControllerState {
         self.state
@@ -81,6 +87,17 @@ impl<B: ControllerBackend> Session<B> {
     pub fn initialized_backend(&mut self) -> Result<&mut B, OperationError> {
         if self.state != ControllerState::Initialized {
             return Err(OperationError::validation("controller is not initialized"));
+        }
+        Ok(self.backend.as_mut().unwrap())
+    }
+    pub(crate) fn recovery_backend(&mut self) -> Result<&mut B, OperationError> {
+        if !matches!(
+            self.state,
+            ControllerState::Initialized | ControllerState::RecoveryRequired
+        ) {
+            return Err(OperationError::validation(
+                "controller unavailable for recovery",
+            ));
         }
         Ok(self.backend.as_mut().unwrap())
     }

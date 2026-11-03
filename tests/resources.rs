@@ -67,7 +67,7 @@ fn owned_file_mapping_keeps_fd_alive_and_reads_expected_offset() {
         mappable: true,
         sparse: None,
     };
-    let mapped = unsafe { MappedRegion::new(file.clone(), &meta, 0..128, 4096) }.unwrap();
+    let mut mapped = unsafe { MappedRegion::new(file.clone(), &meta, 0..128, 4096) }.unwrap();
     assert_eq!(Arc::strong_count(&file), 2);
     assert_eq!(mapped.length(), 4096);
     assert_eq!(unsafe { mapped.pointer().as_ptr().read_volatile() }, 17);
@@ -75,6 +75,11 @@ fn owned_file_mapping_keeps_fd_alive_and_reads_expected_offset() {
         unsafe { mapped.pointer().as_ptr().add(1).read_volatile() },
         23
     );
+    unsafe {
+        mapped.unmap_after_quiescence().unwrap();
+        mapped.unmap_after_quiescence().unwrap();
+    }
+    assert_eq!(mapped.length(), 0);
     drop(mapped);
     assert_eq!(Arc::strong_count(&file), 1);
 }

@@ -73,11 +73,23 @@ pub enum RequestState {
         completion_code: u32,
         logical_cancel: bool,
     },
+    Failed {
+        error: OperationError,
+        completion_code: Option<u32>,
+        quiescent: bool,
+    },
     Aborted,
 }
 impl RequestState {
     pub fn device_may_access(&self) -> bool {
-        matches!(self, Self::Pending { .. })
+        matches!(
+            self,
+            Self::Pending { .. }
+                | Self::Failed {
+                    quiescent: false,
+                    ..
+                }
+        )
     }
 }
 
@@ -97,6 +109,9 @@ impl RequestLedger {
             next: 0,
             entries: BTreeMap::new(),
         }
+    }
+    pub(crate) fn session_id(&self) -> u64 {
+        self.session
     }
     pub fn submit(&mut self) -> Result<RequestId, OperationError> {
         let sequence = self.next;
@@ -128,8 +143,8 @@ impl RequestLedger {
             .entries
             .get_mut(&id)
             .ok_or_else(|| OperationError::validation("unknown or stale request"))?;
-        if !state.device_may_access() {
-            return Err(OperationError::validation("request already terminal"));
+        if !matches!(state, RequestState::Pending { .. }) {
+            return Err(OperationError::validation("request is no longer pending"));
         }
         Ok(state)
     }
@@ -169,7 +184,28 @@ impl RequestLedger {
     }
     /// The backend must establish quiescence before calling this metadata operation.
     pub fn confirm_abort(&mut self, id: RequestId) -> Result<(), OperationError> {
-        *self.pending(id)? = RequestState::Aborted;
+        let state = self
+            .entries
+            .get_mut(&id)
+            .ok_or_else(|| OperationError::validation("unknown request"))?;
+        if !state.device_may_access() {
+            return Err(OperationError::validation("request already terminal"));
+        }
+        *state = RequestState::Aborted;
+        Ok(())
+    }
+    pub fn fail(
+        &mut self,
+        id: RequestId,
+        error: OperationError,
+        completion_code: Option<u32>,
+        quiescent: bool,
+    ) -> Result<(), OperationError> {
+        *self.pending(id)? = RequestState::Failed {
+            error,
+            completion_code,
+            quiescent,
+        };
         Ok(())
     }
     pub fn reclaim(&mut self, id: RequestId) -> Result<RequestState, OperationError> {
@@ -244,3 +280,12 @@ impl ControllerState {
         }
     }
 }
+
+pub mod ports;
+
+pub mod descriptors;
+
+pub mod requests;
+
+pub mod capabilities;
+pub mod control_plan;
