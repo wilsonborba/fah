@@ -145,3 +145,11 @@ class TraceContracts(unittest.TestCase):
         self.assertEqual(len(lab.validate_trace([first,second],text)),2)
         first['data_trb_length']=8
         with self.assertRaises(AssertionError):lab.validate_trace([first],text)
+
+
+class ReplayTraceRegression(unittest.TestCase):
+    def test_old_td_replay_fails_even_when_new_td_fields_match(self):
+        one=b'usb_xhci_fetch_trb addr 0x0, TR_SETUP, p 0x0008000001000680, s 0x00000008, c 0x00030841\nusb_xhci_fetch_trb addr 0x10, TR_DATA, p 0x10000, s 0x00000012, c 0x00010c01\n'
+        text=one+one
+        window=dict(kind='trace_window',name='plan',start=0,end=len(text),setup_wlength=8,data_trb_length=18)
+        with self.assertRaisesRegex(AssertionError,'duplicate'):lab.validate_trace([window],text)
