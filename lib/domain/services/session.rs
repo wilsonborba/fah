@@ -156,9 +156,6 @@ impl<B: ControllerBackend> Drop for Session<B> {
     }
 }
 fn next_session_id() -> Result<u64, OperationError> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SESSION: AtomicU64 = AtomicU64::new(1 << 32);
-    SESSION
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-        .map_err(|_| OperationError::validation("session identity exhausted"))
+    crate::core::identity::fresh()
+        .ok_or_else(|| OperationError::validation("session identity exhausted"))
 }
