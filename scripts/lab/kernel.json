@@ -1,0 +1,6 @@
+{
+  "version": "6.12.95+deb13-amd64",
+  "kernel_sha256": "251a0bc71561054dec560f522904b0861f5b1ffa403b3459ee2db910d629cae9",
+  "config_sha256": "5b75efc64d382368ac963e847d734e49fa6ea9c711a5d4441aaf65fee65b6431",
+  "source": "Debian linux-image-6.12.95+deb13-amd64 installed package; copied unmodified for isolated guest"
+}
