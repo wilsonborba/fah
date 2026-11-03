@@ -3,6 +3,8 @@ import errno
 import importlib.util
 import pathlib
 import struct
+import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -112,6 +114,30 @@ class LabGuards(unittest.TestCase):
             (run / 'pid').write_text('999999999')
             lab.manage_run(path, 'test', 'cleanup')
             self.assertFalse(run.exists())
+
+    def test_generated_outputs_follow_the_repository_layout(self):
+        release_spec = importlib.util.spec_from_file_location('fah_release_layout', ROOT / 'scripts/release.py')
+        release = importlib.util.module_from_spec(release_spec)
+        release_spec.loader.exec_module(release)
+        self.assertEqual((lab.DEFAULT_LAB, lab.EVIDENCE, release.OUTPUT), (ROOT / 'target/fah-lab', ROOT / 'docs/evidence', ROOT / 'target/fah-release'))
+        for path in (lab.DEFAULT_LAB, lab.EVIDENCE, release.OUTPUT):
+            # Ignored outputs keep release_only() clean, and nothing generated lives in scripts/ (#62).
+            subprocess.run(['git', '-C', str(ROOT), 'check-ignore', '-q', str(path / 'probe')], check=True)
+            self.assertFalse(path.is_relative_to(ROOT / 'scripts'))
+        self.assertFalse(lab.EVIDENCE.is_relative_to(ROOT / 'target'))  # cargo clean must not delete evidence
+        self.assertFalse(release.OUTPUT.is_relative_to(ROOT / 'target/release'))  # the clean candidate build removes it (#63)
+
+    def test_cleanup_removes_runtime_state_and_keeps_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            runtime, record = lab.run_directories(root / 'lab', root / 'evidence', 'smoke')
+            self.assertEqual((runtime.parent, record.parent, runtime.name), (root / 'lab/runs', root / 'evidence', record.name))
+            self.assertTrue(all((path / '.fah-lab-run').is_file() for path in (runtime, record)))
+            (runtime / 'pid').write_text('999999999')
+            (record / 'result.json').write_text('{}')
+            lab.manage_run(root / 'lab', runtime.name, 'cleanup')
+            self.assertFalse(runtime.exists())
+            self.assertEqual((record / 'result.json').read_text(), '{}')
 
 
 class FixtureClassification(unittest.TestCase):

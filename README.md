@@ -69,6 +69,13 @@ The maintained changes are `patches/crabusb-hosted-backend.patch` and
 checks the complete patched tree and refuses unknown edits. `.fah-cache/` is generated
 source storage, not an upstream fork or an independent second controller owner.
 
+`python3 scripts/prepare-dependencies.py --check` only verifies, with no network
+access and no changes. It rebuilds the expected trees from the pinned revision, the
+pinned archive and the patches in a temporary directory, then compares every file.
+Only CrabUSB's Git metadata and the top-level `target/` and `Cargo.lock` written by
+`scripts/test-backend.py` are excluded. A difference stops the command and stays in
+place. Both modes give the same result from any working directory.
+
 CrabUSB changes expose explicit steps, hosted synchronization, reviewed DMA accesses,
 real endpoint stop/reset/rebase and resumable lifecycle support. The DMA patch uses
 volatile scalar access, disables mapped-reference helpers and supports the VFIO
@@ -114,10 +121,11 @@ guest kernel, virtual PCI controller and virtual-IOMMU/VFIO topology.
 ### Obtain guest kernel inputs without a host installation
 
 The lab can read an already installed matching kernel, or a privately extracted
-Debian package. The latter changes only the selected cache directory:
+Debian package. The latter writes only to the selected directory inside the ignored
+`target/` of this checkout. Run it from the repository root:
 
 ```sh
-export FAH_KERNEL_DIR="$HOME/.cache/fah-kernel-inputs"
+export FAH_KERNEL_DIR="$PWD/target/fah-lab/kernel-inputs"
 mkdir -p "$FAH_KERNEL_DIR"
 curl --fail --location --output "$FAH_KERNEL_DIR/linux-image.deb" \
   'https://security.debian.org/debian-security/pool/updates/main/l/linux-signed-amd64/linux-image-6.12.95+deb13-amd64_6.12.95-1_amd64.deb'
@@ -140,10 +148,14 @@ record the exact userspace libraries and executable copied into the initramfs.
 VM preparation/execution is deliberately restricted to a **clean
 `release/v0.1.0`** checkout. Build outputs/caches are ignored and do not dirty it.
 After changing the release source, rebuild the executable and prepare a new image.
+Build the payload from a clean release profile with the pinned toolchain; do not set
+`RUSTUP_TOOLCHAIN`. Cargo reuses artifacts from any toolchain of the same version,
+and a different installation (for example one with `rust-src`) embeds other paths.
 
 ```sh
 git switch release/v0.1.0
 python3 scripts/prepare-dependencies.py
+cargo clean --release
 cargo build --locked --release --features hosted-direct
 python3 scripts/lab.py plan
 python3 scripts/lab.py prepare --kernel-root "$FAH_KERNEL_DIR/root"
@@ -171,9 +183,16 @@ The fault suite pauses only the **guest child's event thread** for its uncertain
 case, resumes it before teardown, and kills only a guest FAH child for SIGKILL testing.
 Its process-death result describes the observed guest VFIO/kernel behavior.
 
-Artifacts persist on disk in `~/.cache/fah-lab/runs/<run>`: exact QEMU command,
-source/image manifest, serial/CLI frames, PCI/VFIO metadata, `xhci.trace`, suite result
-and, where applicable, `trace-validation.json` or `failure-matrix.json`. The emulator
+Generated files stay inside the checkout and are ignored by Git:
+
+| Location | Contents |
+| --- | --- |
+| `target/fah-lab/` | image, kernel copy, rootfs, image manifest and private kernel inputs |
+| `target/fah-lab/runs/<run>/` | runtime state of one run: synthetic disk, QMP socket and PID |
+| `docs/evidence/<run>/` | evidence of one run: exact QEMU command, source/image manifest, serial/CLI frames, PCI/VFIO metadata, `xhci.trace` and its event list, suite result and, where applicable, `trace-validation.json` or `failure-matrix.json` |
+| `target/fah-release/` | candidate package, see below |
+
+`cargo clean` deletes `target/`, but not the evidence in `docs/evidence/`. The emulator
 trace is independent of FAH logging and is not a physical USB analyzer capture.
 
 ```sh
@@ -183,7 +202,8 @@ python3 scripts/lab.py cleanup --run <generated-run-directory-name>
 
 Stop validates that the recorded PID belongs to that generated QEMU. Cleanup requires
 its marker and a stopped process; it refuses unrelated/reused PIDs and arbitrary paths.
-Artifacts/builds belong outside `/tmp`; tmpfs-backed lab directories are rejected.
+Cleanup deletes only the runtime state and keeps the evidence. The checkout, and with
+it every lab directory, must be on disk; `/tmp` and tmpfs-backed lab directories are rejected.
 
 ## Persistent CLI and JSON protocol
 
@@ -386,3 +406,37 @@ validation. Remaining gates are [isolated target #32](https://github.com/wilsonb
 FAH is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE).
 Dependencies retain their own licenses. Modified source patches and release packages
 must carry their applicable upstream notices; dependency updates require renewed review.
+
+
+## Build a versioned preview candidate
+
+`python3 scripts/release.py audit` checks the locked normal/build dependency graph,
+preserved upstream texts and reviewed omissions; `--write-notices` regenerates
+`THIRD_PARTY_NOTICES.md`. The candidate includes the full license texts, modification
+notice, source snapshot, patches, checksums and dependency provenance. See
+[third-party notices](THIRD_PARTY_NOTICES.md) and [modifications](NOTICE).
+
+On the clean release, after rebuilding/preparing and passing the six required fresh
+runs, package their exact generated directories:
+
+```text
+python3 scripts/release.py candidate --evidence <feasibility-run> --evidence <fixture-run> --evidence <smoke-run-1> --evidence <smoke-run-2> --evidence <explicit-run> --evidence <faults-run>
+```
+
+Each evidence argument is an absolute `docs/evidence/<run>` path. Packaging
+requires the same source commit and executable hash as every selected run. It verifies
+the eleven trace windows/failure rows and refuses failed, stale or incomplete evidence.
+Both `audit` and `candidate` first run the `--check` comparison above, before Cargo
+metadata or license texts are read. The candidate refuses a `RUSTUP_TOOLCHAIN`
+override, removes the release profile, rebuilds from the verified trees, repeats the
+comparison and records it in `provenance.json`. The rebuilt executable must equal the
+VM-tested one. Unknown dependency edits stop packaging.
+Artifacts default to `target/fah-release/`; `SHA256SUMS`, sidecar archive checksum,
+`provenance.json`, `dependency-licenses.json` and `RELEASE-NOTES.md` are included.
+The binary is tested for the recorded Linux/userspace/toolchain; arbitrary-host byte
+identity or ABI compatibility is not promised.
+
+Regenerate the changelog with `git-cliff --tag v0.1.0 --output CHANGELOG.md` using
+git-cliff2.10.1. The packaging tool never merges, tags or publishes. Final main/tag
+promotion follows the explicitly authorized release workflow after guest validation;
+publication of a hosted release remains a separate action.
