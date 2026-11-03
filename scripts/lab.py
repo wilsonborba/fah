@@ -20,7 +20,9 @@ import time
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 KERNEL = '6.12.95+deb13-amd64'
 MACHINE = 'pc-q35-10.0'
-DEFAULT_LAB = pathlib.Path.home() / '.cache/fah-lab'
+# Generated VM files and runtime state are build output; completed run evidence is local, untracked documentation.
+DEFAULT_LAB = ROOT / 'target' / 'fah-lab'
+EVIDENCE = ROOT / 'docs' / 'evidence'
 
 
 def command(*args):
@@ -86,9 +88,21 @@ def cpio(root):
     return bytes(archive)
 
 
-def prepare(lab):
+def kernel_inputs(kernel_root,expected):
+    kernel=kernel_root/'boot'/('vmlinuz-'+KERNEL)
+    config=kernel_root/'boot'/('config-'+KERNEL)
+    assert digest(kernel)==expected['kernel_sha256'],'kernel checksum mismatch'
+    assert digest(config)==expected['config_sha256'],'kernel config checksum mismatch'
+    return kernel,config
+
+
+def prepare(lab,kernel_root=pathlib.Path('/')):
     release_only()
+    kernel_root=kernel_root.expanduser().resolve()
+    expected=json.loads((ROOT/'scripts/lab/kernel.json').read_text())
+    kernel,config=kernel_inputs(kernel_root,expected)
     info = inventory(lab)
+    info['kernel_input_root']=str(kernel_root)
     lab.mkdir(parents=True, exist_ok=True)
     stage = lab / 'rootfs'
     if stage.is_symlink():
@@ -131,7 +145,7 @@ def prepare(lab):
     module_paths = []
     initial_count = 0
     for module in ['vfio-pci', 'qemu_fw_cfg', 'xhci_pci', 'usb_storage', 'usbhid', 'sd_mod']:
-        for line in command('/sbin/modprobe', '--show-depends', '-S', KERNEL, module).splitlines():
+        for line in command('/sbin/modprobe','-d',str(kernel_root), '--show-depends', '-S', KERNEL, module).splitlines():
             if line.startswith('insmod '):
                 path = pathlib.Path(line.split()[1])
                 if path not in module_paths:
@@ -140,15 +154,12 @@ def prepare(lab):
             initial_count = len(module_paths)
     modules = []
     for index, path in enumerate(module_paths):
+        key=str(path).split(KERNEL+'/',1)[1]
+        assert digest(path)==expected['module_sha256'].get(key),'kernel module checksum mismatch: '+key
         target = stage / 'modules' / f'{index:02}.ko'
         target.write_bytes(lzma.decompress(path.read_bytes()) if path.suffix == '.xz' else path.read_bytes())
         sources[str(path)] = digest(path)
         modules.append('/modules/' + target.name)
-    kernel = pathlib.Path('/boot/vmlinuz-' + KERNEL)
-    config = pathlib.Path('/boot/config-' + KERNEL)
-    expected = json.loads((ROOT / 'scripts/lab/kernel.json').read_text())
-    assert digest(kernel) == expected['kernel_sha256'], 'kernel checksum mismatch'
-    assert digest(config) == expected['config_sha256'], 'kernel config checksum mismatch'
     shutil.copy2(kernel, lab / 'kernel')
     sources[str(kernel)] = digest(kernel)
     sources[str(config)] = digest(config)
@@ -156,7 +167,7 @@ def prepare(lab):
     (stage / 'run-id').write_text(run_id)
     binary=ROOT/'target/release/fah'
     if not binary.is_file():
-        raise ValueError('build payload first: RUSTUP_TOOLCHAIN=stable cargo build --locked --release --features hosted-direct')
+        raise ValueError('build the payload first with the pinned toolchain: cargo clean --release && cargo build --locked --release --features hosted-direct')
     executable(binary,'bin/fah')
     copy_file(ROOT / 'scripts/lab/guest.py', 'guest.py')
     (stage/'restore-modules.json').write_text(json.dumps(modules[initial_count:]))
@@ -179,22 +190,30 @@ stty raw -echo < /dev/ttyS0
     print(json.dumps({'prepared': str(lab), 'run_id': run_id, 'initramfs_bytes': (lab / 'initramfs.gz').stat().st_size}))
 
 
-def run(lab, suite):
+def run_directories(lab, evidence, suite):
+    """One run: runtime state (disk, QMP socket, PID) under the lab, its evidence record under docs/evidence."""
+    name = f'{time.time_ns()}-{suite}'
+    runtime, record = lab / 'runs' / name, evidence / name
+    for directory in (runtime, record):
+        directory.mkdir(parents=True)
+        (directory / '.fah-lab-run').touch()
+    return runtime, record
+
+
+def run(lab, suite, evidence=EVIDENCE):
     release_only()
     inventory(lab)
     manifest = json.loads((lab / 'manifest.json').read_text())
     assert digest(lab / 'initramfs.gz') == manifest['initramfs_sha256'], 'initramfs checksum mismatch'
     assert digest(lab / 'kernel') == manifest['kernel_sha256'], 'kernel checksum mismatch'
     assert manifest['commit'] == command('git', '-C', str(ROOT), 'rev-parse', 'HEAD'), 'rebuild initramfs for current release commit'
-    run_dir = lab / 'runs' / f'{time.time_ns()}-{suite}'
-    run_dir.mkdir(parents=True)
-    (run_dir / '.fah-lab-run').touch()
+    runtime, run_dir = run_directories(lab, evidence, suite)
     shutil.copy2(lab / 'manifest.json', run_dir / 'manifest.json')
-    disk=run_dir/'synthetic-usb.raw'
+    disk=runtime/'synthetic-usb.raw'
     with disk.open('wb')as fixture:
         fixture.write(bytes(range(256))*2)
         fixture.truncate(8*1024*1024)
-    qmp_path=run_dir/'qmp.sock'
+    qmp_path=runtime/'qmp.sock'
     trace_path=run_dir/'xhci.trace'
     trace_events=run_dir/'trace-events'
     trace_events.write_text('\n'.join(['usb_xhci_port_write','usb_xhci_runtime_write','usb_xhci_oper_write','usb_xhci_irq_msix','usb_xhci_fetch_trb','usb_xhci_slot_enable','usb_xhci_slot_address','usb_xhci_slot_configure','usb_xhci_port_reset','usb_xhci_ep_stop','usb_xhci_ep_reset','usb_xhci_ep_set_dequeue','usb_xhci_xfer_success','usb_xhci_xfer_error','usb_xhci_queue_event'])+'\n')
@@ -204,7 +223,7 @@ def run(lab, suite):
     events = []
     with (run_dir / 'qemu.stderr').open('wb') as errors, (run_dir / 'serial.log').open('wb') as serial:
         process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors,umask=0o077)
-        (run_dir/"pid").write_text(str(process.pid))
+        (runtime/"pid").write_text(str(process.pid))
         qmp=None
         try:
             deadline=time.monotonic()+5
@@ -264,7 +283,7 @@ def run(lab, suite):
         result=result and len(matrix)==11 and all(row['verified']for row in matrix)
     (run_dir / 'events.json').write_text(json.dumps(events, indent=2))
     (run_dir / 'result.json').write_text(json.dumps({'success': result, 'qemu_exit': process.returncode, 'suite': suite, 'evidence': 'emulated_only'}))
-    print(json.dumps({'artifacts': str(run_dir), 'success': result}))
+    print(json.dumps({'artifacts': str(run_dir), 'runtime': str(runtime), 'success': result}))
     return 0 if result and process.returncode == 0 else 1
 
 
@@ -377,6 +396,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['plan', 'prepare', 'run','stop','cleanup'])
     parser.add_argument('--lab', type=pathlib.Path, default=DEFAULT_LAB)
+    parser.add_argument('--kernel-root',type=pathlib.Path,default=pathlib.Path('/'),help='installed / or privately extracted/depmod-prepared Debian guest kernel root')
     parser.add_argument('--suite', choices=['feasibility','fixture','smoke','explicit','faults'], default='feasibility')
     parser.add_argument('--run',help='single generated run directory name for stop/cleanup')
     args = parser.parse_args()
@@ -384,7 +404,7 @@ def main():
     if args.action == 'plan':
         print(json.dumps(inventory(lab), indent=2))
     elif args.action == 'prepare':
-        prepare(lab)
+        prepare(lab,args.kernel_root)
     elif args.action=="run":
         return run(lab, args.suite)
     else:

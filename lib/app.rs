@@ -10,6 +10,14 @@ pub fn run(
     err: &mut impl Write,
 ) -> i32 {
     let result = match commands::parse(args) {
+        Ok(Command::Capabilities) => {
+            if serde_json::to_writer(&mut *out, &crate::domain::models::capabilities::report())
+                .is_err()
+            {
+                return 1;
+            }
+            writeln!(out)
+        }
         Ok(Command::Help) => out.write_all(settings::HELP.as_bytes()),
         Ok(Command::Shell { json, run_id }) => {
             #[cfg(feature = "hosted-direct")]

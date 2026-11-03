@@ -1,0 +1,80 @@
+{
+  "usb-if@0.7.0": {
+    "license": "MIT",
+    "files": [
+      {
+        "path": "assets/licenses/usb-if-0.7.0-MIT.txt",
+        "sha256": "231d6f60c9e0e25672ab684eabb18f30099ff14c0a5e084946e588762c83632f",
+        "source": "https://github.com/drivercraft/CrabUSB/blob/e83b56b0672460b400105f3855222af58c03af87/usb-host/LICENSE",
+        "origin": "shared-project-published-text"
+      }
+    ],
+    "note": "usb-if declares MIT and omits a standalone text; this is the same pinned project's published MIT notice, preserved verbatim."
+  },
+  "dma-api@0.7.3": {
+    "license": "Apache-2.0",
+    "files": [
+      {
+        "path": "assets/licenses/dma-api-0.7.3-APACHE-2.0.txt",
+        "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+        "source": "https://github.com/rcore-os/tgoskits/blob/4b0046b041082d16e2befc8d6035ab63796e0b14/LICENSE",
+        "origin": "exact-upstream-revision"
+      }
+    ],
+    "note": "The published dma-api archive declares Apache-2.0 but omits standalone text; its exact VCS revision supplies this repository license."
+  },
+  "lenient_semver_parser@0.4.2": {
+    "license": "MIT OR Apache-2.0",
+    "files": [
+      {
+        "path": "assets/licenses/lenient-semver-0.4.2-LICENSE",
+        "sha256": "bf9e48952828f72149b42d82d00eef96a75a26be9813b7c3a0f8eca3ff91a2c4",
+        "source": "https://github.com/knutwalker/lenient-semver/blob/976087dd3697853dd9a1227c6a8da8da601ad74b/LICENSE",
+        "origin": "matching-version-workspace-text"
+      },
+      {
+        "path": "assets/licenses/lenient-semver-0.4.2-LICENSE-APL",
+        "sha256": "6dd7e62ed5488f7fa3e68253e19b5b2fbb6ffeb70f7358240e24814ed81515c3",
+        "source": "https://github.com/knutwalker/lenient-semver/blob/976087dd3697853dd9a1227c6a8da8da601ad74b/LICENSE-APL",
+        "origin": "matching-version-workspace-text"
+      }
+    ],
+    "note": "Component archive omits standalone texts; matching-version workspace package publishes these texts and has the same VCS revision."
+  },
+  "lenient_semver_version_builder@0.4.2": {
+    "license": "MIT OR Apache-2.0",
+    "files": [
+      {
+        "path": "assets/licenses/lenient-semver-0.4.2-LICENSE",
+        "sha256": "bf9e48952828f72149b42d82d00eef96a75a26be9813b7c3a0f8eca3ff91a2c4",
+        "source": "https://github.com/knutwalker/lenient-semver/blob/976087dd3697853dd9a1227c6a8da8da601ad74b/LICENSE",
+        "origin": "matching-version-workspace-text"
+      },
+      {
+        "path": "assets/licenses/lenient-semver-0.4.2-LICENSE-APL",
+        "sha256": "6dd7e62ed5488f7fa3e68253e19b5b2fbb6ffeb70f7358240e24814ed81515c3",
+        "source": "https://github.com/knutwalker/lenient-semver/blob/976087dd3697853dd9a1227c6a8da8da601ad74b/LICENSE-APL",
+        "origin": "matching-version-workspace-text"
+      }
+    ],
+    "note": "Component archive omits standalone texts; matching-version workspace package publishes these texts and has the same VCS revision."
+  },
+  "trait-ffi@0.2.11": {
+    "license": "MIT",
+    "files": [
+      {
+        "path": "assets/licenses/trait-ffi-0.2.11-MIT.txt",
+        "sha256": "38f44c4fc8acbece91d29bc7a03f304c91073eceb241b7169fef0726cecffd6f",
+        "source": "MIT as declared by Cargo.toml/README at https://github.com/ZR233/trait-ffi/tree/61379b7043341dced18b03245cc85a46aef85a33",
+        "origin": "supplied-standard-text-with-upstream-attribution"
+      },
+      {
+        "path": "assets/licenses/trait-ffi-0.2.11-NOTICE.txt",
+        "sha256": "3daf9484533b80bcc82ea169a3c61dbb1df439e938fdc47b6d6e0f92356d871b",
+        "source": "Published crate authors/README and pinned repository tree",
+        "origin": "reviewed-attribution-note"
+      }
+    ],
+    "note": "No upstream standalone text exists at the published VCS revision; supplied standard MIT text and exact published author metadata are explicitly distinguished from upstream files."
+  }
+}
