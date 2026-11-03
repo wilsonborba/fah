@@ -14,7 +14,11 @@ pub struct Handler<B: ExplicitBackend> {
 impl<B: ExplicitBackend> Handler<B> {
     pub fn new(backend: B) -> Self {
         Self {
-            usb: UsbSession::new(backend, 1),
+            usb: UsbSession::new(
+                backend,
+                crate::core::identity::fresh()
+                    .expect("session identity budget exhausted before acquisition"),
+            ),
             sequence: 0,
             quitting: false,
             waits: Default::default(),
@@ -117,9 +121,9 @@ impl<B: ExplicitBackend> Handler<B> {
             ),
             ShellCommand::Version => Ok(json!({"version":env!("CARGO_PKG_VERSION")})),
             ShellCommand::Capabilities => Ok(json!(capabilities::registry())),
-            ShellCommand::State => {
-                Ok(json!({"state":self.usb.session.state(),"resources":self.usb.session.inspect()}))
-            }
+            ShellCommand::State => Ok(
+                json!({"state":self.usb.session.state(),"session_id":self.usb.session.identity(),"resources":self.usb.session.inspect()}),
+            ),
             ShellCommand::Open { target } => {
                 self.usb.session.acquire(&target)?;
                 Ok(json!({"target":target,"initialized":false}))
