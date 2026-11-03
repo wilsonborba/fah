@@ -2,12 +2,29 @@
 use super::{requests::RequestBackend, usb::UsbSession};
 use crate::domain::models::{ErrorCategory, OperationError, RequestId, requests::*};
 pub trait RecoveryBackend: RequestBackend {
+    fn reset_endpoint_recovery(
+        &mut self,
+        _slot: u8,
+        _endpoint: u8,
+        _preserve: bool,
+    ) -> Result<BackendAbort, OperationError> {
+        Err(crate::domain::models::requests::unsupported(
+            "endpoint reset unavailable",
+        ))
+    }
     /// Err means no complete quiescence proof; retain every uncertain resource.
     /// After stop confirmation, partial progress is returned with an error field.
     fn abort_endpoint(&mut self, slot: u8, endpoint: u8) -> Result<BackendAbort, OperationError>;
 }
 impl<B: RecoveryBackend> UsbSession<B> {
     pub fn abort_request(&mut self, target: RequestId) -> Result<AbortReport, OperationError> {
+        self.recover_request(target, None)
+    }
+    pub(crate) fn recover_request(
+        &mut self,
+        target: RequestId,
+        reset: Option<bool>,
+    ) -> Result<AbortReport, OperationError> {
         let original = self.request_status(target)?;
         if !original.state.device_may_access() {
             return Err(OperationError::validation("request already terminal"));
@@ -28,10 +45,11 @@ impl<B: RecoveryBackend> UsbSession<B> {
             })
             .map(|(id, record)| (*id, record.token))
             .collect();
-        let outcome = self
-            .session
-            .recovery_backend()?
-            .abort_endpoint(device.slot, endpoint);
+        let backend = self.session.recovery_backend()?;
+        let outcome = match reset {
+            Some(preserve) => backend.reset_endpoint_recovery(device.slot, endpoint, preserve),
+            None => backend.abort_endpoint(device.slot, endpoint),
+        };
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
