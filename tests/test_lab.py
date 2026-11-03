@@ -112,3 +112,13 @@ class LabGuards(unittest.TestCase):
             (run / 'pid').write_text('999999999')
             lab.manage_run(path, 'test', 'cleanup')
             self.assertFalse(run.exists())
+
+
+class FixtureClassification(unittest.TestCase):
+    def test_capabilities_identify_high_speed_keyboard_without_overwriting_storage(self):
+        keyboard=[dict(transfer_type='interrupt',direction='in',address=129)]
+        storage=[dict(transfer_type='bulk',direction='in',address=129),dict(transfer_type='bulk',direction='out',address=2)]
+        self.assertEqual(guest.fixture_role(keyboard),'keyboard')
+        self.assertEqual(guest.fixture_role(storage),'storage')
+        with self.assertRaises(ValueError):guest.fixture_role([])
+        with self.assertRaises(ValueError):guest.fixture_role(keyboard+storage)

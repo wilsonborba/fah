@@ -178,6 +178,15 @@ class Cli:
         assert not errors,errors
 
 
+def fixture_role(endpoints):
+    capabilities={(ep['transfer_type'],ep['direction'])for ep in endpoints}
+    if capabilities=={('bulk','in'),('bulk','out')}:
+        return 'storage'
+    if capabilities=={('interrupt','in')}:
+        return 'keyboard'
+    raise ValueError('unknown synthetic fixture endpoint capabilities')
+
+
 def smoke():
     cli=Cli()
     try:
@@ -195,7 +204,9 @@ def smoke():
             descriptor=next(step['result']for step in steps if step['operation']=='device_descriptor')
             assert descriptor['bytes'][1]==1 and descriptor['actual_length']==18
             endpoints=next(step['result']for step in steps if step['operation']=='endpoints')
-            devices['storage'if port['speed_code']>=3 else 'keyboard']=(value['device'],endpoints)
+            role=fixture_role(endpoints)
+            assert role not in devices,'duplicate fixture role'
+            devices[role]=(value['device'],endpoints)
         storage,endpoints=devices['storage']
         bulk_in=next(ep['address']for ep in endpoints if ep['transfer_type']=='bulk'and ep['direction']=='in')
         bulk_out=next(ep['address']for ep in endpoints if ep['transfer_type']=='bulk'and ep['direction']=='out')
