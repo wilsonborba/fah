@@ -122,3 +122,11 @@ class FixtureClassification(unittest.TestCase):
         self.assertEqual(guest.fixture_role(storage),'storage')
         with self.assertRaises(ValueError):guest.fixture_role([])
         with self.assertRaises(ValueError):guest.fixture_role(keyboard+storage)
+
+
+class ScsiVsUsbLength(unittest.TestCase):
+    def test_padded_usb_data_keeps_independent_scsi_residue(self):
+        raw=b'USBS'+struct.pack('<II',7,28)+bytes([0])
+        guest.validate_csw(raw,7,64,36)
+        for candidate,tag,length,processed in [(raw,8,64,36),(raw,7,64,64),(raw[:-1]+bytes([1]),7,64,36)]:
+            with self.assertRaises(AssertionError):guest.validate_csw(candidate,tag,length,processed)
