@@ -93,6 +93,12 @@ impl<B: RequestBackend> UsbSession<B> {
         }
         Ok(())
     }
+    pub fn request_reports(&self) -> Result<Vec<RequestReport>, OperationError> {
+        self.records
+            .keys()
+            .map(|id| self.request_status(*id))
+            .collect()
+    }
     pub fn request_status(&self, id: RequestId) -> Result<RequestReport, OperationError> {
         let record = self
             .records

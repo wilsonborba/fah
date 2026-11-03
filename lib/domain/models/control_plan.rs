@@ -12,11 +12,13 @@ pub enum ControlProfile {
     DeviceCompatibility,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DataStage {
     pub direction: Direction,
     pub length: usize,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ControlPlan {
     pub device: DeviceId,
     pub profile: ControlProfile,

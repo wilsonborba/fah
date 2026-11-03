@@ -1,6 +1,7 @@
 //! Bounded descriptor parsing preserves the transport response on parse errors.
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DescriptorRequest {
     pub kind: u8,
     pub index: u8,
@@ -208,4 +209,13 @@ pub fn validate_configuration(bytes: &[u8]) -> Result<(), String> {
         return Err("configuration interface count mismatch".into());
     }
     Ok(())
+}
+
+/// Decode bMaxPacketSize0 using the observed root-port speed (xHCI PSI code).
+pub fn decode_ep0_packet_size(speed: u8, encoded: u8) -> Result<u16, String> {
+    match (speed, encoded) {
+        (1, 8 | 16 | 32 | 64) | (2, 8) | (3, 64) => Ok(encoded as u16),
+        (4 | 5, 9) => Ok(512),
+        _ => Err("invalid bMaxPacketSize0 for observed speed".into()),
+    }
 }

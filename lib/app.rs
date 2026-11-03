@@ -11,6 +11,21 @@ pub fn run(
 ) -> i32 {
     let result = match commands::parse(args) {
         Ok(Command::Help) => out.write_all(settings::HELP.as_bytes()),
+        Ok(Command::Shell { json, run_id }) => {
+            #[cfg(feature = "hosted-direct")]
+            {
+                return crate::presentation::cli::runtime::stdin_shell(run_id, json, out, err);
+            }
+            #[cfg(not(feature = "hosted-direct"))]
+            {
+                let _ = (json, run_id);
+                let _ = writeln!(
+                    err,
+                    "shell requires the hosted-direct build; help never opens a controller"
+                );
+                return 2;
+            }
+        }
         Ok(Command::Version) => writeln!(out, "fah {}", settings::VERSION),
         Err(message) => {
             let _ = writeln!(err, "{message}");

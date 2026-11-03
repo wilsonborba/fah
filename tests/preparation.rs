@@ -157,9 +157,15 @@ use fah::domain::models::descriptors::DescriptorRequest;
 impl ConfigurationBackend for Fake {
     fn descriptor(&mut self, _: u8, request: DescriptorRequest) -> Result<Vec<u8>, OperationError> {
         self.effect(&format!("descriptor:{}", request.length))?;
-        let bytes = vec![
-            9, 2, 25, 0, 1, 2, 0, 128, 50, 9, 4, 0, 0, 1, 3, 0, 0, 0, 7, 5, 129, 3, 8, 0, 10,
-        ];
+        let bytes = if request.kind == 1 {
+            vec![
+                18, 1, 0, 2, 0, 0, 0, 8, 0x34, 0x12, 0x78, 0x56, 0, 1, 0, 0, 0, 1,
+            ]
+        } else {
+            vec![
+                9, 2, 25, 0, 1, 2, 0, 128, 50, 9, 4, 0, 0, 1, 3, 0, 0, 0, 7, 5, 129, 3, 8, 0, 10,
+            ]
+        };
         Ok(bytes[..bytes.len().min(request.length as usize)].to_vec())
     }
     fn ep0_packet_size(&mut self, _: u8, size: u16) -> Result<(), OperationError> {
@@ -665,4 +671,402 @@ fn explicit_plan_uses_same_request_ownership_and_rejects_stale_before_effect() {
     assert_eq!(state.lock().unwrap().trace.len(), before);
     assert_eq!(usb.noop().unwrap()[2] >> 24, 1);
     usb.close().unwrap();
+}
+
+#[test]
+fn persistent_cli_keeps_one_owner_and_frames_failures_without_mutation() {
+    use fah::presentation::cli::{formatters::OutputMode, handlers::Handler, runtime};
+    let state = Arc::new(Mutex::new(State {
+        status: 3 | (1 << 9) | (1 << 10),
+        ..Default::default()
+    }));
+    let (tx, rx) = std::sync::mpsc::channel();
+    for line in [
+        "help",
+        r#"{"op":"open","target":"fake"}"#,
+        "state",
+        r#"{"op":"open","target":"other"}"#,
+        "{bad",
+        r#"{"op":"init","unknown":true}"#,
+        "init",
+        "state",
+        "close",
+    ] {
+        tx.send(Ok(line.into())).unwrap();
+    }
+    drop(tx);
+    let (mut out, mut err) = (vec![], vec![]);
+    assert_eq!(
+        runtime::run(
+            Handler::new(Fake(state.clone())),
+            rx,
+            &mut out,
+            &mut err,
+            OutputMode::Json
+        ),
+        1
+    );
+    assert!(err.is_empty());
+    let frames: Vec<serde_json::Value> = String::from_utf8(out)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(frames.len(), 10);
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame["schema_version"] == 1 && frame["kind"] == "response")
+    );
+    assert_eq!(frames[2]["session_state"], "acquired_unknown");
+    assert_eq!(frames[7]["session_state"], "initialized");
+    assert_eq!(frames[9]["session_state"], "closed");
+    assert_eq!(
+        state.lock().unwrap().trace,
+        ["acquire", "init-controller", "close"]
+    );
+}
+
+#[test]
+fn cli_explicit_usb_steps_and_async_wait_preserve_request_ownership() {
+    use fah::{
+        domain::models::Outcome,
+        presentation::cli::{
+            commands::{ShellCommand, parse_line},
+            handlers::Handler,
+        },
+    };
+    use serde_json::json;
+    let (usb, state) = fixture();
+    let mut handler = Handler::new(Fake(state.clone()));
+    handler.usb = usb;
+    let mut call = |value: serde_json::Value| {
+        handler
+            .dispatch(parse_line(&value.to_string()).unwrap())
+            .unwrap()
+    };
+    let ports = call(json!({"op":"ports"}));
+    let port = ports[0]["id"].clone();
+    call(json!({"op":"port_ack","port":port,"changes":0}));
+    let port = call(json!({"op":"port_reset","port":port}))["id"].clone();
+    let device = call(json!({"op":"slot_enable","port":port}))["id"].clone();
+    call(json!({"op":"address","device":device,"bsr":true}));
+    call(json!({"op":"address","device":device}));
+    call(
+        json!({"op":"descriptor","device":device,"request":{"kind":2,"index":0,"language":0,"length":25}}),
+    );
+    call(json!({"op":"packet_size","device":device,"size":8}));
+    call(json!({"op":"configuration","device":device,"value":2}));
+    call(json!({"op":"interface","device":device,"interface":0,"alternate":0}));
+    call(json!({"op":"endpoints","device":device,"interface":0}));
+    let request = call(
+        json!({"op":"submit","request":{"device":device,"endpoint":129,"transfer_type":"interrupt","direction":"in","length":8,"setup":null}}),
+    );
+    let id: fah::domain::models::RequestId = serde_json::from_value(request["id"].clone()).unwrap();
+    let accepted = handler.execute(ShellCommand::Wait { id, timeout_ms: 0 });
+    assert!(matches!(accepted.result.outcome, Outcome::Pending));
+    let events = handler.tick();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, "event");
+    assert_eq!(events[0].result.operation_id, accepted.result.operation_id);
+    assert!(matches!(events[0].result.outcome, Outcome::Partial { .. }));
+    assert_eq!(state.lock().unwrap().pending.len(), 1);
+    assert!(handler.usb.reclaim_request(id).is_err());
+    handler.execute(ShellCommand::LogicalCancel { id });
+    assert_eq!(state.lock().unwrap().pending.len(), 1);
+    let token = state.lock().unwrap().next_token;
+    state
+        .lock()
+        .unwrap()
+        .completions
+        .insert(token, complete(3, 13, vec![1, 2, 3]));
+    let accepted = handler.execute(ShellCommand::Wait {
+        id,
+        timeout_ms: 100,
+    });
+    assert!(matches!(accepted.result.outcome, Outcome::Pending));
+    assert!(matches!(
+        handler.execute(ShellCommand::State).result.outcome,
+        Outcome::Completed(_)
+    ));
+    let event = handler.tick().remove(0);
+    assert!(matches!(event.result.outcome, Outcome::Completed(_)));
+    let reclaimed = handler.dispatch(ShellCommand::Reclaim { id }).unwrap();
+    assert_eq!(reclaimed["data"], json!([1, 2, 3]));
+    assert_eq!(reclaimed["state"]["completion_code"], 13);
+    let before = state.lock().unwrap().trace.len();
+    let bad = handler.execute(ShellCommand::Unsupported {
+        capability: "direct_dpdm".into(),
+    });
+    assert!(matches!(bad.result.outcome, Outcome::Failed(_)));
+    assert_eq!(state.lock().unwrap().trace.len(), before);
+    handler.usb.close().unwrap();
+}
+#[test]
+fn cli_abort_reports_partial_progress_instead_of_success() {
+    use fah::{
+        domain::models::Outcome,
+        presentation::cli::{commands::ShellCommand, handlers::Handler},
+    };
+    let (mut usb, state, device) = addressed();
+    let request = usb.submit_request(control(device, 8)).unwrap();
+    state.lock().unwrap().fail = Some("rebase:completed");
+    let mut handler = Handler::new(Fake(state.clone()));
+    handler.usb = usb;
+    let frame = handler.execute(ShellCommand::Abort { id: request.id });
+    let Outcome::Partial { payload, .. } = frame.result.outcome else {
+        panic!("partial abort was misreported")
+    };
+    assert_eq!(payload["restart_ready"], false);
+    assert_eq!(payload["aborted"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        handler.usb.session.state(),
+        ControllerState::RecoveryRequired
+    );
+    handler.usb.close().unwrap();
+}
+
+#[test]
+fn convenience_enumeration_matches_explicit_steps_and_reports_failure_prefix() {
+    use fah::domain::models::Outcome;
+    use fah::presentation::cli::{commands::ShellCommand, handlers::Handler};
+    let (usb, state) = fixture();
+    let mut handler = Handler::new(Fake(state.clone()));
+    handler.usb = usb;
+    let port = handler.usb.inspect_ports().unwrap()[0].id;
+    let frame = handler.execute(ShellCommand::Enumerate {
+        port,
+        configuration_index: 0,
+        configure: true,
+        interface: 0,
+        alternate: 0,
+    });
+    let Outcome::Completed(value) = frame.result.outcome else {
+        panic!("enumeration failed")
+    };
+    assert_eq!(value["steps"].as_array().unwrap().len(), 11);
+    assert_eq!(value["configured"], true);
+    let effects: Vec<_> = state
+        .lock()
+        .unwrap()
+        .trace
+        .iter()
+        .filter(|step| step.as_str() != "read")
+        .cloned()
+        .collect();
+    assert_eq!(
+        effects,
+        [
+            "acquire",
+            "init-controller",
+            "reset",
+            "enable-slot",
+            "address:normal",
+            "descriptor:8",
+            "ep0:8",
+            "descriptor:18",
+            "descriptor:9",
+            "descriptor:25",
+            "configuration:2",
+            "endpoints:0:0"
+        ]
+    );
+    handler.usb.close().unwrap();
+    let (usb, state) = fixture();
+    let mut handler = Handler::new(Fake(state.clone()));
+    handler.usb = usb;
+    let port = handler.usb.inspect_ports().unwrap()[0].id;
+    state.lock().unwrap().fail = Some("descriptor:18");
+    let frame = handler.execute(ShellCommand::Enumerate {
+        port,
+        configuration_index: 0,
+        configure: true,
+        interface: 0,
+        alternate: 0,
+    });
+    let Outcome::Partial { payload, .. } = frame.result.outcome else {
+        panic!("missing partial result")
+    };
+    assert_eq!(payload["failed_operation"], "device_descriptor");
+    assert_eq!(payload["steps"].as_array().unwrap().len(), 6);
+    assert!(
+        !state
+            .lock()
+            .unwrap()
+            .trace
+            .iter()
+            .any(|op| op.starts_with("configuration:"))
+    );
+    handler.usb.close().unwrap();
+}
+#[test]
+fn ordered_batch_stops_on_failure_and_retains_outstanding_requests() {
+    use fah::domain::models::Outcome;
+    use fah::presentation::cli::{commands::ShellCommand, handlers::Handler};
+    let (usb, state, device) = addressed();
+    let mut handler = Handler::new(Fake(state.clone()));
+    handler.usb = usb;
+    let before = state.lock().unwrap().trace.len();
+    let preview = handler.execute(ShellCommand::Batch {
+        operations: vec![ShellCommand::Submit {
+            request: control(device, 8),
+        }],
+        preview: true,
+    });
+    assert!(matches!(preview.result.outcome, Outcome::Completed(_)));
+    assert_eq!(state.lock().unwrap().trace.len(), before);
+    let frame = handler.execute(ShellCommand::Batch {
+        operations: vec![
+            ShellCommand::Submit {
+                request: control(device, 8),
+            },
+            ShellCommand::Unsupported {
+                capability: "direct_dpdm".into(),
+            },
+            ShellCommand::Close,
+        ],
+        preview: false,
+    });
+    let Outcome::Partial { payload, .. } = frame.result.outcome else {
+        panic!("batch failed to report prefix")
+    };
+    assert_eq!(payload["operations"].as_array().unwrap().len(), 2);
+    assert_eq!(payload["outstanding_requests"].as_array().unwrap().len(), 1);
+    assert_eq!(state.lock().unwrap().pending.len(), 1);
+    assert_eq!(handler.usb.session.state(), ControllerState::Initialized);
+    let before = state.lock().unwrap().trace.len();
+    assert!(
+        handler
+            .dispatch(ShellCommand::Batch {
+                operations: vec![ShellCommand::Batch {
+                    operations: vec![],
+                    preview: false
+                }],
+                preview: false
+            })
+            .is_err()
+    );
+    assert_eq!(state.lock().unwrap().trace.len(), before);
+    handler.usb.close().unwrap();
+}
+
+#[test]
+fn failed_shutdown_retains_ownership_across_repeated_interrupts() {
+    use fah::presentation::cli::{
+        formatters::OutputMode, handlers::Handler, runtime::run_with_signals, signals::Interrupt,
+    };
+    let (mut usb, state, device) = addressed();
+    usb.submit_request(control(device, 8)).unwrap();
+    state.lock().unwrap().fail = Some("close");
+    let mut handler = Handler::new(Fake(state.clone()));
+    handler.usb = usb;
+    let (_tx, rx) = std::sync::mpsc::channel();
+    let (mut out, mut err) = (vec![], vec![]);
+    let mut count = 0;
+    let code = run_with_signals(handler, rx, &mut out, &mut err, OutputMode::Json, || {
+        count += 1;
+        match count {
+            1 => Some(Interrupt::Term),
+            2 => {
+                assert_eq!(state.lock().unwrap().pending.len(), 1);
+                state.lock().unwrap().fail = None;
+                Some(Interrupt::Int)
+            }
+            _ => None,
+        }
+    });
+    assert_eq!(code, 1);
+    assert!(state.lock().unwrap().pending.is_empty());
+    let frames: Vec<serde_json::Value> = String::from_utf8(out)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(frames[0]["session_state"], "recovery_required");
+    assert_eq!(frames.last().unwrap()["session_state"], "closed");
+    assert!(!err.is_empty());
+}
+#[test]
+fn interrupting_wait_does_not_abort_usb_until_shutdown_is_explicit() {
+    use fah::presentation::cli::{
+        commands::ShellCommand, formatters::OutputMode, handlers::Handler,
+        runtime::run_with_signals, signals::Interrupt,
+    };
+    let (mut usb, state, device) = addressed();
+    let request = usb.submit_request(control(device, 8)).unwrap();
+    let mut handler = Handler::new(Fake(state.clone()));
+    handler.usb = usb;
+    handler.execute(ShellCommand::Wait {
+        id: request.id,
+        timeout_ms: 10000,
+    });
+    let (_tx, rx) = std::sync::mpsc::channel();
+    let (mut out, mut err) = (vec![], vec![]);
+    let mut count = 0;
+    assert_eq!(
+        run_with_signals(handler, rx, &mut out, &mut err, OutputMode::Json, || {
+            count += 1;
+            if count == 1 {
+                Some(Interrupt::Int)
+            } else {
+                assert_eq!(state.lock().unwrap().pending.len(), 1);
+                assert!(
+                    !state
+                        .lock()
+                        .unwrap()
+                        .trace
+                        .iter()
+                        .any(|op| op.starts_with("stop:"))
+                );
+                Some(Interrupt::Term)
+            }
+        }),
+        0
+    );
+    let frames: Vec<serde_json::Value> = String::from_utf8(out)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(frames[0]["kind"], "event");
+    assert_eq!(frames[0]["outcome"]["payload"]["usb_aborted"], false);
+    assert_eq!(frames.last().unwrap()["session_state"], "closed");
+}
+#[test]
+fn broken_output_and_eof_cannot_bypass_failed_close() {
+    use fah::presentation::cli::{
+        formatters::OutputMode, handlers::Handler, runtime::run_with_signals, signals::Interrupt,
+    };
+    struct Broken;
+    impl std::io::Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let (mut usb, state, device) = addressed();
+    usb.submit_request(control(device, 8)).unwrap();
+    state.lock().unwrap().fail = Some("close");
+    let mut handler = Handler::new(Fake(state.clone()));
+    handler.usb = usb;
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(Ok("state".into())).unwrap();
+    drop(tx);
+    let mut err = vec![];
+    assert_eq!(
+        run_with_signals(handler, rx, &mut Broken, &mut err, OutputMode::Json, || {
+            let mut state = state.lock().unwrap();
+            if state.trace.iter().any(|op| op == "close") && state.fail.is_some() {
+                assert_eq!(state.pending.len(), 1);
+                state.fail = None;
+                Some(Interrupt::Term)
+            } else {
+                None
+            }
+        }),
+        1
+    );
+    assert!(state.lock().unwrap().pending.is_empty());
 }
