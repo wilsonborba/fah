@@ -129,12 +129,15 @@ def prepare(lab):
             else:
                 copy_file(path)
     module_paths = []
-    for module in ['vfio-pci', 'qemu_fw_cfg']:
+    initial_count = 0
+    for module in ['vfio-pci', 'qemu_fw_cfg', 'xhci_pci', 'usb_storage', 'usbhid', 'sd_mod']:
         for line in command('/sbin/modprobe', '--show-depends', '-S', KERNEL, module).splitlines():
             if line.startswith('insmod '):
                 path = pathlib.Path(line.split()[1])
                 if path not in module_paths:
                     module_paths.append(path)
+        if module == "qemu_fw_cfg":
+            initial_count = len(module_paths)
     modules = []
     for index, path in enumerate(module_paths):
         target = stage / 'modules' / f'{index:02}.ko'
@@ -151,7 +154,12 @@ def prepare(lab):
     sources[str(config)] = digest(config)
     run_id = 'fah-' + command('git', '-C', str(ROOT), 'rev-parse', '--short=12', 'HEAD')
     (stage / 'run-id').write_text(run_id)
+    binary=ROOT/'target/release/fah'
+    if not binary.is_file():
+        raise ValueError('build payload first: RUSTUP_TOOLCHAIN=stable cargo build --locked --release --features hosted-direct')
+    executable(binary,'bin/fah')
     copy_file(ROOT / 'scripts/lab/guest.py', 'guest.py')
+    (stage/'restore-modules.json').write_text(json.dumps(modules[initial_count:]))
     init = '''#!/bin/sh
 export PATH=/bin
 mount -t proc proc /proc
@@ -161,7 +169,7 @@ mount -t tmpfs tmpfs /tmp
 mount -t tmpfs tmpfs /run
 stty raw -echo < /dev/ttyS0
 '''
-    init += ''.join(f'insmod {module} || echo FAH_MODULE_FAILED_{module}\n' for module in modules)
+    init += ''.join(f'insmod {module} || echo FAH_MODULE_FAILED_{module}\n' for module in modules[:initial_count])
     init += '/bin/python3 -u /guest.py "$(cat /proc/cmdline | /bin/busybox sed -n \'s/.*fah_suite=\\([^ ]*\\).*/\\1/p\')"\necho FAH_GUEST_DONE\npoweroff -f\nwhile true; do sleep 1; done\n'
     (stage / 'init').write_text(init)
     (stage / 'init').chmod(0o755)
@@ -182,13 +190,28 @@ def run(lab, suite):
     run_dir.mkdir(parents=True)
     (run_dir / '.fah-lab-run').touch()
     shutil.copy2(lab / 'manifest.json', run_dir / 'manifest.json')
-    args = ['qemu-system-x86_64', '-machine', MACHINE + ',accel=kvm,kernel-irqchip=split', '-cpu', 'host', '-m', '2048', '-smp', '2', '-nodefaults', '-display', 'none', '-no-reboot', '-serial', 'stdio', '-monitor', 'none', '-kernel', str(lab / 'kernel'), '-initrd', str(lab / 'initramfs.gz'), '-append', 'console=ttyS0 rdinit=/init intel_iommu=on iommu.strict=1 panic=-1 fah_suite=' + suite, '-fw_cfg', 'name=opt/fah-lab,string=' + manifest['run_id'], '-device', 'intel-iommu,intremap=on,caching-mode=on,device-iotlb=on', '-device', 'qemu-xhci,id=xhci,addr=02.0,p2=4,p3=4']
+    disk=run_dir/'synthetic-usb.raw'
+    with disk.open('wb')as fixture:
+        fixture.write(bytes(range(256))*2)
+        fixture.truncate(8*1024*1024)
+    qmp_path=run_dir/'qmp.sock'
+    trace_path=run_dir/'xhci.trace'
+    trace_events=run_dir/'trace-events'
+    trace_events.write_text('\n'.join(['usb_xhci_fetch_trb','usb_xhci_slot_enable','usb_xhci_slot_address','usb_xhci_slot_configure','usb_xhci_port_reset','usb_xhci_ep_stop','usb_xhci_ep_reset','usb_xhci_ep_set_dequeue','usb_xhci_xfer_success','usb_xhci_xfer_error','usb_xhci_queue_event'])+'\n')
+    args = ['qemu-system-x86_64' , '-machine', MACHINE + ',accel=kvm,kernel-irqchip=split', '-cpu', 'host', '-m', '2048', '-smp', '2', '-nodefaults', '-display', 'none', '-no-reboot', '-serial', 'stdio', '-monitor', 'none', '-kernel', str(lab / 'kernel'), '-initrd', str(lab / 'initramfs.gz'), '-append', 'console=ttyS0 rdinit=/init intel_iommu=on iommu.strict=1 panic=-1 fah_suite=' + suite, '-fw_cfg', 'name=opt/fah-lab,string=' + manifest['run_id'], '-device', 'intel-iommu,intremap=on,caching-mode=on,device-iotlb=on', '-device', 'qemu-xhci,id=xhci,addr=02.0,p2=4,p3=4', '-device','usb-kbd,id=keyboard,bus=xhci.0,port=1','-drive',f'if=none,id=usbdata,format=raw,file={disk}','-device','usb-storage,id=storage,bus=xhci.0,port=2,drive=usbdata','-qmp',f'unix:{qmp_path},server=on,wait=off','-trace',f'events={trace_events},file={trace_path}']
     (run_dir / 'command.json').write_text(json.dumps(args, indent=2))
     result = False
     events = []
     with (run_dir / 'qemu.stderr').open('wb') as errors, (run_dir / 'serial.log').open('wb') as serial:
-        process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors)
+        process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors,umask=0o077)
+        (run_dir/"pid").write_text(str(process.pid))
+        qmp=None
         try:
+            deadline=time.monotonic()+5
+            while not qmp_path.exists() and process.poll() is None and time.monotonic()<deadline:
+                time.sleep(.02)
+            qmp=Qmp(qmp_path)
+            (run_dir/'pci.json').write_text(json.dumps(qmp.execute('query-pci'),indent=2))
             selector = selectors.DefaultSelector()
             selector.register(process.stdout, selectors.EVENT_READ)
             deadline = time.monotonic() + 180
@@ -211,12 +234,18 @@ def run(lab, suite):
                         event = json.loads(line[8:])
                         events.append(event)
                         print(json.dumps({key:value for key,value in event.items() if key not in ("regions","iommu_raw")}), flush=True)
+                        if event['kind']=='host_action':
+                            response=host_action(qmp,event,trace_path)
+                            process.stdin.write((json.dumps(response)+'\n').encode())
+                            process.stdin.flush()
                         if event['kind'] == 'result':
                             result = event['success']
             if process.poll() is None:
                 process.terminate()
                 process.wait(timeout=5)
         finally:
+            if qmp is not None:
+                qmp.close()
             if process.poll() is None:
                 process.kill()
                 process.wait()
@@ -226,19 +255,87 @@ def run(lab, suite):
     return 0 if result and process.returncode == 0 else 1
 
 
+class Qmp:
+    def __init__(self,path):
+        self.socket=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+        self.socket.settimeout(5)
+        self.socket.connect(str(path))
+        self.file=self.socket.makefile('rwb',buffering=0)
+        assert 'QMP' in json.loads(self.file.readline())
+        self.execute('qmp_capabilities')
+
+    def execute(self,name,arguments=None):
+        self.file.write((json.dumps({'execute':name,'arguments':arguments or {}})+'\n').encode())
+        while True:
+            answer=json.loads(self.file.readline())
+            if 'error'in answer:
+                raise ValueError(answer['error'])
+            if 'return'in answer:
+                return answer['return']
+
+    def close(self):
+        self.file.close()
+        self.socket.close()
+
+
+def host_action(qmp,event,trace):
+    action=event['action']
+    if action=='phase':
+        qmp.execute('query-status')
+        return {'ok':True,'trace_offset':trace.stat().st_size if trace.exists()else 0,'phase':event['phase']}
+    if action=='key':
+        qmp.execute('input-send-event',{'events':[{'type':'key','data':{'down':True,'key':{'type':'qcode','data':'a'}}}]})
+        return {'ok':True}
+    if action=='unplug_keyboard':
+        qmp.execute('device_del',{'id':'keyboard'})
+        return {'ok':True}
+    raise ValueError('unsupported guest host-action')
+
+
+def selected_run(lab,name):
+    if not name or pathlib.Path(name).name!=name or name in ('.','..'):
+        raise ValueError('select one generated --run directory name')
+    candidate=lab/'runs'/name
+    if candidate.is_symlink() or not candidate.is_relative_to(lab/'runs') or not(candidate/'.fah-lab-run').is_file():
+        raise ValueError('unrecognized generated run')
+    return candidate
+
+
+def manage_run(lab,name,action):
+    path=selected_run(lab,name)
+    pid=int((path/'pid').read_text())
+    commandline=pathlib.Path(f'/proc/{pid}/cmdline')
+    active=commandline.exists()
+    if active:
+        args=commandline.read_bytes().split(b'\0')
+        if not args or b'qemu-system-x86_64'not in args[0] or str(path/'qmp.sock').encode()not in b' '.join(args):
+            raise ValueError('PID is not this generated QEMU; refusing action')
+    if action=='stop' and active:
+        qmp=Qmp(path/'qmp.sock')
+        try:qmp.execute('quit')
+        finally:qmp.close()
+    elif action=='cleanup':
+        if active:raise ValueError('stop the generated QEMU before cleanup')
+        shutil.rmtree(path)
+    print(json.dumps({'action':action,'run':name,'active_before':active}))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['plan', 'prepare', 'run'])
+    parser.add_argument('action', choices=['plan', 'prepare', 'run','stop','cleanup'])
     parser.add_argument('--lab', type=pathlib.Path, default=DEFAULT_LAB)
-    parser.add_argument('--suite', choices=['feasibility'], default='feasibility')
+    parser.add_argument('--suite', choices=['feasibility','fixture'], default='feasibility')
+    parser.add_argument('--run',help='single generated run directory name for stop/cleanup')
     args = parser.parse_args()
     lab = safe_lab(args.lab)
     if args.action == 'plan':
         print(json.dumps(inventory(lab), indent=2))
     elif args.action == 'prepare':
         prepare(lab)
-    else:
+    elif args.action=="run":
         return run(lab, args.suite)
+    else:
+        manage_run(lab,args.run,args.action)
     return 0
 
 

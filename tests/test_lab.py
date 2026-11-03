@@ -53,3 +53,62 @@ class GuestMetadata(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+host_spec = importlib.util.spec_from_file_location('fah_lab', ROOT / 'scripts/lab.py')
+lab = importlib.util.module_from_spec(host_spec)
+host_spec.loader.exec_module(lab)
+
+
+class LabGuards(unittest.TestCase):
+    def test_branch_and_tmpfs_guards(self):
+        with patch.object(lab, 'command', return_value='feature/not-release'):
+            with self.assertRaises(ValueError):
+                lab.release_only()
+        with self.assertRaises(ValueError):
+            lab.safe_lab('/tmp/fah-lab')
+        with patch.object(lab, 'command', return_value='tmpfs'):
+            with self.assertRaises(ValueError):
+                lab.safe_lab('/home/example/fah-lab')
+
+    def test_missing_and_corrupt_images_cannot_launch_qemu(self):
+        import tempfile
+        import json
+        with tempfile.TemporaryDirectory() as directory, patch.object(lab, 'release_only'), patch.object(lab, 'inventory'), patch.object(lab.subprocess, 'Popen') as popen:
+            path = pathlib.Path(directory)
+            with self.assertRaises(FileNotFoundError):
+                lab.run(path, 'fixture')
+            (path / 'manifest.json').write_text(json.dumps({'initramfs_sha256': 'bad'}))
+            (path / 'initramfs.gz').write_bytes(b'corrupt')
+            with self.assertRaises(AssertionError):
+                lab.run(path, 'fixture')
+            popen.assert_not_called()
+
+    def test_missing_kvm_and_low_memory_are_explicit_failures(self):
+        with patch.object(pathlib.Path, 'read_text', return_value='MemAvailable: 10000000 kB\n'), patch('builtins.open', side_effect=FileNotFoundError('/dev/kvm')):
+            with self.assertRaises(FileNotFoundError):
+                lab.inventory(ROOT)
+        file = MagicMock()
+        with patch.object(pathlib.Path, 'read_text', return_value='MemAvailable: 1000 kB\n'), patch('builtins.open', return_value=file), patch.object(lab.fcntl, 'ioctl', return_value=12):
+            with self.assertRaisesRegex(ValueError, 'MemAvailable'):
+                lab.inventory(ROOT)
+
+    def test_cleanup_refuses_unknown_state_and_pid_reuse(self):
+        import tempfile
+        import os
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory)
+            for name in ['..', '../outside', '', '/etc']:
+                with self.assertRaises(ValueError):
+                    lab.selected_run(path, name)
+            run = path / 'runs/test'
+            run.mkdir(parents=True)
+            with self.assertRaises(ValueError):
+                lab.selected_run(path, 'test')
+            (run / '.fah-lab-run').touch()
+            (run / 'pid').write_text(str(os.getpid()))
+            with self.assertRaises(ValueError):
+                lab.manage_run(path, 'test', 'stop')
+            self.assertTrue(run.exists())
+            (run / 'pid').write_text('999999999')
+            lab.manage_run(path, 'test', 'cleanup')
+            self.assertFalse(run.exists())
