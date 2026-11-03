@@ -178,6 +178,23 @@ class Cli:
         assert not errors,errors
 
 
+def fixture_role(endpoints):
+    capabilities={(ep['transfer_type'],ep['direction'])for ep in endpoints}
+    if capabilities=={('bulk','in'),('bulk','out')}:
+        return 'storage'
+    if capabilities=={('interrupt','in')}:
+        return 'keyboard'
+    raise ValueError('unknown synthetic fixture endpoint capabilities')
+
+
+def validate_csw(raw,tag,usb_length,scsi_length):
+    assert len(raw)==13 and raw[:4]==b'USBS','invalid CSW signature/size'
+    assert struct.unpack_from('<I',raw,4)[0]==tag,'CSW tag mismatch'
+    assert raw[12]==0,'SCSI command failed'
+    assert 0<=scsi_length<=usb_length,'invalid SCSI expectation'
+    assert struct.unpack_from('<I',raw,8)[0]==usb_length-scsi_length,'SCSI residue mismatch'
+
+
 def smoke():
     cli=Cli()
     try:
@@ -195,7 +212,9 @@ def smoke():
             descriptor=next(step['result']for step in steps if step['operation']=='device_descriptor')
             assert descriptor['bytes'][1]==1 and descriptor['actual_length']==18
             endpoints=next(step['result']for step in steps if step['operation']=='endpoints')
-            devices['storage'if port['speed_code']>=3 else 'keyboard']=(value['device'],endpoints)
+            role=fixture_role(endpoints)
+            assert role not in devices,'duplicate fixture role'
+            devices[role]=(value['device'],endpoints)
         storage,endpoints=devices['storage']
         bulk_in=next(ep['address']for ep in endpoints if ep['transfer_type']=='bulk'and ep['direction']=='in')
         bulk_out=next(ep['address']for ep in endpoints if ep['transfer_type']=='bulk'and ep['direction']=='out')
@@ -203,7 +222,7 @@ def smoke():
         assert len(short['data'])==18 and short['state']['actual_length']==18
         assert short['state']['completion_code']in(1,13)
         tag=0
-        def scsi(cdb,length):
+        def scsi(cdb,length,scsi_length=None):
             nonlocal tag
             tag+=1
             cbw=b'USBC'+struct.pack('<II',tag,length)+bytes([128,0,len(cdb)])+bytes(cdb).ljust(16,b'\0')
@@ -213,11 +232,13 @@ def smoke():
             data=cli.transfer(storage,bulk_in,'bulk','in',length)
             csw=cli.transfer(storage,bulk_in,'bulk','in',13)
             raw=bytes(csw['data'])
-            assert raw[:4]==b'USBS'and struct.unpack_from('<I',raw,4)[0]==tag and raw[12]==0,raw
-            assert struct.unpack_from('<I',raw,8)[0]==length-len(data['data'])
+            processed=length if scsi_length is None else scsi_length
+            validate_csw(raw,tag,length,processed)
+            assert len(data['data'])==length, data
+            assert not any(data['data'][processed:]),'nonzero synthetic padding'
             return data
-        inquiry=scsi([18,0,0,0,36,0],64)
-        assert len(inquiry['data'])==36 and bytes(inquiry['data'][8:12])==b'QEMU'
+        inquiry=scsi([18,0,0,0,36,0],64,36)
+        assert len(inquiry['data'])==64 and bytes(inquiry['data'][8:12])==b'QEMU'
         scsi([3,0,0,0,18,0],18)
         block=scsi([40,0,0,0,0,0,0,0,1,0],512)
         assert bytes(block['data'])==bytes(range(256))*2
@@ -243,7 +264,7 @@ def smoke():
         cli.command({'op':'quit'})
         cli.process.wait(timeout=10)
         assert cli.process.returncode==1
-        report('smoke',control_short=len(short['data']),bulk_read=len(block['data']),inquiry_short=len(inquiry['data']),interrupt_reports=reports,closed_allocations=0,reopen=True,stale_rejected=True)
+        report('smoke',control_short=len(short['data']),bulk_read=len(block['data']),inquiry_usb_bytes=len(inquiry['data']),inquiry_scsi_bytes=36,inquiry_csw_residue=28,interrupt_reports=reports,closed_allocations=0,reopen=True,stale_rejected=True)
     finally:
         if cli.process.poll()is None:
             try:cli.command({'op':'close'});cli.command({'op':'quit'});cli.process.wait(timeout=10)

@@ -112,3 +112,21 @@ class LabGuards(unittest.TestCase):
             (run / 'pid').write_text('999999999')
             lab.manage_run(path, 'test', 'cleanup')
             self.assertFalse(run.exists())
+
+
+class FixtureClassification(unittest.TestCase):
+    def test_capabilities_identify_high_speed_keyboard_without_overwriting_storage(self):
+        keyboard=[dict(transfer_type='interrupt',direction='in',address=129)]
+        storage=[dict(transfer_type='bulk',direction='in',address=129),dict(transfer_type='bulk',direction='out',address=2)]
+        self.assertEqual(guest.fixture_role(keyboard),'keyboard')
+        self.assertEqual(guest.fixture_role(storage),'storage')
+        with self.assertRaises(ValueError):guest.fixture_role([])
+        with self.assertRaises(ValueError):guest.fixture_role(keyboard+storage)
+
+
+class ScsiVsUsbLength(unittest.TestCase):
+    def test_padded_usb_data_keeps_independent_scsi_residue(self):
+        raw=b'USBS'+struct.pack('<II',7,28)+bytes([0])
+        guest.validate_csw(raw,7,64,36)
+        for candidate,tag,length,processed in [(raw,8,64,36),(raw,7,64,64),(raw[:-1]+bytes([1]),7,64,36)]:
+            with self.assertRaises(AssertionError):guest.validate_csw(candidate,tag,length,processed)
