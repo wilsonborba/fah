@@ -14,6 +14,9 @@ import tarfile
 import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+_release_spec = importlib.util.spec_from_file_location('fah_release_context', ROOT / 'scripts/release_context.py')
+RELEASE_CONTEXT = importlib.util.module_from_spec(_release_spec)
+_release_spec.loader.exec_module(RELEASE_CONTEXT)
 TARGET = 'x86_64-unknown-linux-gnu'
 ALLOWED = {'MIT', 'Apache-2.0', 'BSD-3-Clause', 'Unlicense', 'Unicode-3.0'}
 # The candidate package is generated build output, next to the executable but outside Cargo's profile directories.
@@ -165,8 +168,7 @@ def verified_runs(paths, commit, binary_hash):
 
 
 def clean_release():
-    if command('git', 'branch', '--show-current') != 'release/v0.1.0' or command('git', 'status', '--porcelain'):
-        raise ValueError('candidate packaging requires clean release/v0.1.0')
+    return RELEASE_CONTEXT.require_clean_release(ROOT, command)
 
 
 def normalize_tar(info):
@@ -196,10 +198,9 @@ def build(sources):
 
 
 def package(output, evidence, metadata, records, sources):
-    clean_release()
-    version = tomllib.loads((ROOT / 'Cargo.toml').read_text())['package']['version']
-    if version != '0.1.0' or not command('rustc', '--version').startswith(f'rustc {pinned_toolchain()} '):
-        raise ValueError('unexpected release version/toolchain')
+    version = clean_release()
+    if not command('rustc', '--version').startswith(f'rustc {pinned_toolchain()} '):
+        raise ValueError('unexpected release toolchain')
     if pathlib.Path(metadata['target_directory']).resolve() != ROOT / 'target':
         raise ValueError('candidate uses the default target directory shared with the VM recipe')
     build(sources)

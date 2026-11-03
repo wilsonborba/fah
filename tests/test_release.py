@@ -225,4 +225,36 @@ class CandidateSourceGate(SourceTrees):
             with self.assertRaisesRegex(ValueError,'pinned 1.91.1 toolchain'):release.build(sources)
 
 
+class ReleaseVersionPolicy(unittest.TestCase):
+    def test_matching_current_future_and_prerelease_versions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for version in ('0.1.0', '0.2.0', '1.0.0-rc.1', '1.0.0+build.7'):
+                with self.subTest(version=version):
+                    (root / 'Cargo.toml').write_text(f'[package]\nversion = "{version}"\n')
+                    with mock.patch.object(release, 'ROOT', root), mock.patch.object(release, 'command', side_effect=['release/v' + version, '']) as command:
+                        self.assertEqual(release.clean_release(), version)
+                    self.assertEqual(command.call_args_list, [mock.call('git', '-C', str(root), 'branch', '--show-current'), mock.call('git', '-C', str(root), 'status', '--porcelain')])
+
+    def test_wrong_nonrelease_detached_and_dirty_branches_cannot_build(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / 'Cargo.toml').write_text('[package]\nversion = "0.2.0"\n')
+            for branch, status in [('release/v0.1.0', ''), ('feature/main', ''), ('', ''), ('release/v0.2.0', ' M Cargo.toml')]:
+                with self.subTest(branch=branch, status=status), mock.patch.object(release, 'ROOT', root), mock.patch.object(release, 'command', side_effect=[branch, status]), mock.patch.object(release, 'build') as build:
+                    with self.assertRaisesRegex(ValueError, 'release/v0.2.0'):
+                        release.package(root / 'out', [], {}, [], {})
+                    build.assert_not_called()
+                    self.assertFalse((root / 'out').exists())
+
+    def test_version_must_be_an_explicit_nonempty_string(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for value in ('""', '" 0.2.0 "', '42', '{ workspace = true }'):
+                with self.subTest(value=value):
+                    (root / 'Cargo.toml').write_text('[package]\nversion = ' + value + '\n')
+                    with self.assertRaisesRegex(ValueError, 'package.version'):
+                        release.RELEASE_CONTEXT.package_version(root)
+
+
 if __name__=='__main__':unittest.main()

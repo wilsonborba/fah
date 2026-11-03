@@ -4,6 +4,7 @@ import argparse
 import fcntl
 import gzip
 import hashlib
+import importlib.util
 import json
 import lzma
 import os
@@ -18,6 +19,9 @@ import sys
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+_release_spec = importlib.util.spec_from_file_location('fah_release_context', ROOT / 'scripts/release_context.py')
+RELEASE_CONTEXT = importlib.util.module_from_spec(_release_spec)
+_release_spec.loader.exec_module(RELEASE_CONTEXT)
 KERNEL = '6.12.95+deb13-amd64'
 MACHINE = 'pc-q35-10.0'
 # Generated VM files and runtime state are build output; completed run evidence is local, untracked documentation.
@@ -34,11 +38,7 @@ def digest(path):
 
 
 def release_only():
-    branch = command('git', '-C', str(ROOT), 'branch', '--show-current')
-    if branch != 'release/v0.1.0':
-        raise ValueError('VM preparation/execution requires release/v0.1.0')
-    if command('git', '-C', str(ROOT), 'status', '--porcelain'):
-        raise ValueError('commit changes before VM preparation/execution')
+    return RELEASE_CONTEXT.require_clean_release(ROOT, command)
 
 
 def safe_lab(path):
