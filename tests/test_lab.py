@@ -59,6 +59,18 @@ host_spec.loader.exec_module(lab)
 
 
 class LabGuards(unittest.TestCase):
+    def test_release_branch_matches_the_manifest_version_and_requires_clean_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / 'Cargo.toml').write_text('[package]\nversion = "0.2.0-rc.1"\n')
+            with patch.object(lab, 'ROOT', root):
+                with patch.object(lab, 'command', side_effect=['release/v0.2.0-rc.1', '']):
+                    self.assertEqual(lab.release_only(), '0.2.0-rc.1')
+                for branch, status in [('release/v0.1.0', ''), ('feature/main', ''), ('', ''), ('release/v0.2.0-rc.1', ' M tracked')]:
+                    with self.subTest(branch=branch, status=status), patch.object(lab, 'command', side_effect=[branch, status]):
+                        with self.assertRaisesRegex(ValueError, 'release/v0.2.0-rc.1'):
+                            lab.release_only()
+
     def test_branch_and_tmpfs_guards(self):
         with patch.object(lab, 'command', return_value='feature/not-release'):
             with self.assertRaises(ValueError):

@@ -145,8 +145,10 @@ record the exact userspace libraries and executable copied into the initramfs.
 
 ### Run and collect evidence
 
-VM preparation/execution is deliberately restricted to a **clean
-`release/v0.1.0`** checkout. Build outputs/caches are ignored and do not dirty it.
+VM preparation/execution and candidate packaging require a **clean
+`release/v<package.version>`** checkout. Both tools read the version from
+`Cargo.toml`; the current version uses `release/v0.1.0`. Build outputs/caches
+are ignored and do not dirty the checkout.
 After changing the release source, rebuild the executable and prepare a new image.
 Build the payload from a clean release profile with the pinned toolchain; do not set
 `RUSTUP_TOOLCHAIN`. Cargo reuses artifacts from any toolchain of the same version,
