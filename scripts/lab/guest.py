@@ -376,10 +376,257 @@ def explicit_behaviors():
     restore()
 
 
+
+def retained(cli):
+    return cli.command({'op':'state'})['resources']['retained_allocations']
+
+
+def bme_enabled():
+    guard()
+    with PCI.joinpath('config').open('rb')as config:
+        config.seek(4)
+        return bool(int.from_bytes(config.read(2),'little')&4)
+
+
+def pending_interrupt(cli,device,endpoint):
+    for _ in range(4):
+        request=cli.command({'op':'submit','request':dict(device=device,endpoint=endpoint,transfer_type='interrupt',direction='in',length=8,setup=None)})
+        event=cli.await_request(request['id'],20)
+        if event['outcome']['status']=='partial':
+            assert event['outcome']['payload']['error']['category']=='timeout',event
+            return request['id']
+        assert event['outcome']['status']=='completed',event
+        cli.command({'op':'reclaim','id':request['id']})
+    raise AssertionError('could not obtain a pending synthetic interrupt')
+
+
+def prepared_keyboard():
+    import contextlib
+    @contextlib.contextmanager
+    def context():
+        host_action('key',down=False)
+        cli=Cli()
+        try:
+            cli.command({'op':'open','target':BDF});cli.command({'op':'init'})
+            # The fixed fixture's USB2 connector1 is observed at xHCI port5.
+            port=next(port for port in cli.command({'op':'ports'})if port['id']['number']==5 and port['connected'])
+            value=cli.command({'op':'enumerate','port':port['id'],'configure':True})
+            endpoints=next(step['result']for step in value['steps']if step['operation']=='endpoints')
+            assert fixture_role(endpoints)=='keyboard'
+            yield cli,value['device'],endpoints[0]['address']
+        finally:
+            if cli.process.poll()is None:
+                cli.command({'op':'close'})
+                assert retained(cli)==0
+                cli.command({'op':'quit'});cli.process.wait(timeout=10)
+                assert cli.process.returncode in(0,1)
+    return context()
+
+
+def case_timeout_cancel_late():
+    with prepared_keyboard()as(cli,device,endpoint):
+        baseline=retained(cli)
+        id=pending_interrupt(cli,device,endpoint)
+        assert retained(cli)==baseline+1
+        cli.command({'op':'logical_cancel','id':id})
+        assert retained(cli)==baseline+1
+        assert cli.raw({'op':'reclaim','id':id})['outcome']['status']=='failed'
+        host_action('key',down=True)
+        event=cli.await_request(id)
+        assert event['outcome']['status']=='completed',event
+        value=event['outcome']['payload']
+        assert value['state']['status']=='completed'and value['logical_cancel']and 4 in value['data'][2:]
+        assert retained(cli)==baseline
+        cli.command({'op':'reclaim','id':id})
+        return dict(baseline=baseline,retained_while_pending=baseline+1,retained_after_completion=baseline,logical_cancel_kept_dma=True,late_completion=True)
+
+
+def case_abort_restart():
+    with prepared_keyboard()as(cli,device,endpoint):
+        baseline=retained(cli)
+        first=pending_interrupt(cli,device,endpoint)
+        second=cli.command({'op':'submit','request':dict(device=device,endpoint=endpoint,transfer_type='interrupt',direction='in',length=8,setup=None)})['id']
+        assert retained(cli)==baseline+2
+        result=cli.command({'op':'abort','id':first})
+        assert result['restart_ready']and result['scope']=='endpoint_wide',result
+        assert first in result['aborted']and second in result['aborted'],result
+        assert retained(cli)==baseline+1,'one old coherent ring is quarantined; both streaming maps must retire'
+        cli.command({'op':'reclaim','id':first});cli.command({'op':'reclaim','id':second})
+        host_action('key',down=True)
+        new=cli.transfer(device,endpoint,'interrupt','in',8)
+        assert 4 in new['data'][2:],new
+        return dict(collateral_requests=2,restart=True,retired_streaming=2,quarantined_coherent_rings=1)
+
+
+def suspend_event_worker(cli):
+    import contextlib
+    import ctypes
+    import time
+    @contextlib.contextmanager
+    def context():
+        guard()
+        assert pathlib.Path(f'/proc/{cli.process.pid}/exe').resolve()==pathlib.Path('/bin/fah')
+        worker=next(path for path in pathlib.Path(f'/proc/{cli.process.pid}/task').iterdir()if(path/'comm').read_text().strip()=='fah-events')
+        deadline=time.monotonic()+2
+        while 'poll'not in(worker/'wchan').read_text()and time.monotonic()<deadline:time.sleep(.01)
+        assert 'poll'in(worker/'wchan').read_text(),'event worker must be idle before injection'
+        libc=ctypes.CDLL(None,use_errno=True)
+        libc.ptrace.argtypes=[ctypes.c_ulong,ctypes.c_ulong,ctypes.c_void_p,ctypes.c_void_p]
+        libc.ptrace.restype=ctypes.c_long
+        tid=int(worker.name)
+        if libc.ptrace(0x4206,tid,None,None)!=0:raise OSError(ctypes.get_errno(),'PTRACE_SEIZE guest event worker')
+        attached=True
+        try:
+            if libc.ptrace(0x4207,tid,None,None)!=0:raise OSError(ctypes.get_errno(),'PTRACE_INTERRUPT guest event worker')
+            waited,status=os.waitpid(tid,0x40000000)
+            assert waited==tid and os.WIFSTOPPED(status)
+            yield tid
+        finally:
+            if attached:
+                assert libc.ptrace(17,tid,None,None)==0,'resume event worker before close/join'
+    return context()
+
+
+def case_uncertain_stop():
+    with prepared_keyboard()as(cli,device,endpoint):
+        id=pending_interrupt(cli,device,endpoint)
+        before=retained(cli)
+        with suspend_event_worker(cli)as tid:
+            failure=cli.raw({'op':'abort','id':id})
+            assert failure['outcome']['status']=='failed'and failure['session_state']=='recovery_required',failure
+            assert retained(cli)==before
+            assert cli.command({'op':'status','id':id})['state']['status']=='pending'
+        # The delayed command event may now drain. Close still requires full halt.
+        cli.command({'op':'close'})
+        assert retained(cli)==0
+        return dict(injection='guest_ptrace_event_worker_only',worker=tid,uncertain_stop=True,retained_before=before,retained_until_proof=before,closed_allocations=0)
+
+
+def case_close_pending():
+    with prepared_keyboard()as(cli,device,endpoint):
+        id=pending_interrupt(cli,device,endpoint)
+        before=retained(cli)
+        cli.command({'op':'close'})
+        assert retained(cli)==0 and not bme_enabled()
+        return dict(pending=id,retained_before=before,closed_allocations=0,bme_after=False)
+
+
+def case_eof_pending():
+    with prepared_keyboard()as(cli,device,endpoint):
+        id=pending_interrupt(cli,device,endpoint)
+        before=retained(cli)
+        cli.process.stdin.close()
+        frame=cli.read()
+        assert frame['session_state']=='closed'and frame['outcome']['payload']['reason']=='eof',frame
+        cli.process.wait(timeout=10)
+        assert cli.process.returncode==1 and not bme_enabled()
+        return dict(pending=id,retained_before=before,normal_shutdown=True,bme_after=False)
+
+
+def case_signals():
+    import signal
+    with prepared_keyboard()as(cli,device,endpoint):
+        id=pending_interrupt(cli,device,endpoint)
+        before=retained(cli)
+        accepted=cli.raw({'op':'wait','id':id,'timeout_ms':100000})
+        assert accepted['outcome']['status']=='pending'
+        os.kill(cli.process.pid,signal.SIGINT)
+        event=cli.read()
+        assert event['kind']=='event'and event['operation_id']==accepted['operation_id']and event['outcome']['payload']['usb_aborted']is False,event
+        assert retained(cli)==before and cli.command({'op':'status','id':id})['state']['status']=='pending'
+        os.kill(cli.process.pid,signal.SIGINT)
+        closed=cli.read()
+        assert closed['session_state']=='closed'and closed['outcome']['payload']['reason']=='sigint'
+        cli.process.wait(timeout=10)
+        assert cli.process.returncode==1 and not bme_enabled()
+        return dict(wait_interrupt_only=True,retained_during_wait_cancel=before,second_interrupt_closed=True,bme_after=False)
+
+
+def case_term():
+    import signal
+    with prepared_keyboard()as(cli,device,endpoint):
+        pending_interrupt(cli,device,endpoint)
+        os.kill(cli.process.pid,signal.SIGTERM)
+        closed=cli.read()
+        assert closed['session_state']=='closed'and closed['outcome']['payload']['reason']=='sigterm'
+        cli.process.wait(timeout=10)
+        assert cli.process.returncode==1 and not bme_enabled()
+        return dict(coordinated_close=True,bme_after=False)
+
+
+def case_reset(preserve):
+    with prepared_keyboard()as(cli,device,endpoint):
+        request=cli.command({'op':'submit','request':dict(device=device,endpoint=0,transfer_type='control',direction='in',length=1,setup=dict(request_type=192,request=255,value=0,index=0,length=1))})
+        failed=cli.await_request(request['id'])
+        value=failed['outcome']['payload']
+        assert value['state']['status']=='failed'and value['state']['completion_code']==6,value
+        before=retained(cli)
+        reset=cli.command({'op':'reset_endpoint','id':request['id'],'preserve':preserve})
+        assert reset['restart_ready']and request['id']in reset['aborted'],reset
+        cli.command({'op':'reclaim','id':request['id']})
+        state=cli.command({'op':'state'})
+        assert state['state']=='initialized','confirmed scoped endpoint recovery must allow continued operations'
+        status=cli.transfer(device,0,'control','in',2,setup=dict(request_type=128,request=0,value=0,index=0,length=2))
+        assert status['state']['actual_length']==2
+        return dict(preserve=preserve,stall_code=6,retained_before_reset=before,restart=True,new_control_transfer=True)
+
+
+def case_process_death():
+    import signal
+    with prepared_keyboard()as(cli,device,endpoint):
+        old=pending_interrupt(cli,device,endpoint)
+        before=retained(cli)
+        os.kill(cli.process.pid,signal.SIGKILL)
+        cli.process.wait(timeout=10)
+        assert cli.process.returncode==-signal.SIGKILL
+        assert not bme_enabled(),'guest VFIO/kernel did not disable PCI BME after process death'
+    with prepared_keyboard()as(cli,device,endpoint):
+        for index in range(old['sequence']+1):
+            accepted=cli.command({'op':'submit','request':dict(device=device,endpoint=0,transfer_type='control',direction='in',length=2,setup=dict(request_type=128,request=0,value=0,index=0,length=2))})
+            if index<old['sequence']:
+                cli.await_request(accepted['id']);cli.command({'op':'reclaim','id':accepted['id']})
+        assert accepted['id']!=old,'new CLI process reused the old session/request identity'
+        assert cli.raw({'op':'status','id':old})['outcome']['status']=='failed','dead-process request ID aliased live work'
+        assert cli.await_request(accepted['id'])['outcome']['payload']['state']['status']=='completed'
+        cli.command({'op':'reclaim','id':accepted['id']})
+        return dict(sigkill='guest_FA H_child_only'.replace(' ',''),retained_before_death=before,kernel_cleanup_bme_off=True,reacquired=True,old_identity_rejected=True,physical_behavior='unverified')
+
+
+def case_disconnect():
+    with prepared_keyboard()as(cli,device,endpoint):
+        id=pending_interrupt(cli,device,endpoint)
+        before=retained(cli)
+        host_action('unplug_keyboard')
+        import time
+        deadline=time.monotonic()+3
+        while True:
+            ports=cli.command({'op':'ports'})
+            disconnected=next(port for port in ports if port['id']['number']==5)
+            if not disconnected['connected']:break
+            assert time.monotonic()<deadline,'emulated unplug deadline'
+            time.sleep(.01)
+        report=cli.command({'op':'poll','id':id})
+        assert retained(cli)==before,'disconnect alone must not free uncertain DMA'
+        cli.command({'op':'close'})
+        assert retained(cli)==0
+        return dict(disconnected=True,request_state=report['state'],retained_until_close=before,closed_allocations=0)
+
+
+def faults():
+    cases=[('timeout_logical_cancel_late_completion',case_timeout_cancel_late),('endpoint_abort_restart',case_abort_restart),('uncertain_stop',case_uncertain_stop),('close_pending',case_close_pending),('eof_pending',case_eof_pending),('sigint_wait_then_shutdown',case_signals),('sigterm_pending',case_term),('endpoint_reset_state',lambda:case_reset(False)),('endpoint_reset_preserve',lambda:case_reset(True)),('guest_process_death',case_process_death),('disconnect_pending',case_disconnect)]
+    for name,operation in cases:
+        report('fault_start',name=name)
+        result=operation()
+        report('fault_case',name=name,verified=True,evidence='emulated_only',**result)
+    restore()
+
+
 def main():
     report('start', suite=sys.argv[1], run_id=pathlib.Path('/run-id').read_text())
     metadata()
-    if sys.argv[1]=='explicit':
+    if sys.argv[1]=='faults':
+        faults()
+    elif sys.argv[1]=='explicit':
         explicit_behaviors()
     elif sys.argv[1]=='smoke':
         smoke()

@@ -258,6 +258,10 @@ def run(lab, suite):
             result=False
             (run_dir/'trace-validation.json').write_text(json.dumps({'verified':False,'error':str(error)}))
             print(json.dumps({'trace_failure':str(error)}),flush=True)
+    if suite=='faults':
+        matrix=[event for event in events if event['kind']=='fault_case']
+        (run_dir/'failure-matrix.json').write_text(json.dumps(matrix,indent=2))
+        result=result and len(matrix)==11 and all(row['verified']for row in matrix)
     (run_dir / 'events.json').write_text(json.dumps(events, indent=2))
     (run_dir / 'result.json').write_text(json.dumps({'success': result, 'qemu_exit': process.returncode, 'suite': suite, 'evidence': 'emulated_only'}))
     print(json.dumps({'artifacts': str(run_dir), 'success': result}))
@@ -293,7 +297,7 @@ def host_action(qmp,event,trace):
         qmp.execute('query-status')
         return {'ok':True,'trace_offset':trace.stat().st_size if trace.exists()else 0,'phase':event['phase']}
     if action=='key':
-        qmp.execute('input-send-event',{'events':[{'type':'key','data':{'down':True,'key':{'type':'qcode','data':'a'}}}]})
+        qmp.execute('input-send-event',{'events':[{'type':'key','data':{'down':bool(event.get('down',True)),'key':{'type':'qcode','data':'a'}}}]})
         return {'ok':True}
     if action=='unplug_keyboard':
         qmp.execute('device_del',{'id':'keyboard'})
@@ -373,7 +377,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['plan', 'prepare', 'run','stop','cleanup'])
     parser.add_argument('--lab', type=pathlib.Path, default=DEFAULT_LAB)
-    parser.add_argument('--suite', choices=['feasibility','fixture','smoke','explicit'], default='feasibility')
+    parser.add_argument('--suite', choices=['feasibility','fixture','smoke','explicit','faults'], default='feasibility')
     parser.add_argument('--run',help='single generated run directory name for stop/cleanup')
     args = parser.parse_args()
     lab = safe_lab(args.lab)
