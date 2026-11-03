@@ -1,6 +1,11 @@
 //! Hardware abort is endpoint-wide and reports collateral requests explicitly.
 use super::{requests::RequestBackend, usb::UsbSession};
 use crate::domain::models::{ErrorCategory, OperationError, RequestId, requests::*};
+pub(crate) struct RecoverableStall {
+    pub revision: u64,
+    pub device: super::usb::DeviceId,
+    pub endpoint: u8,
+}
 pub trait RecoveryBackend: RequestBackend {
     fn reset_endpoint_recovery(
         &mut self,
@@ -121,6 +126,23 @@ impl<B: RecoveryBackend> UsbSession<B> {
         }
         if outcome.error.is_some() || !outcome.restart_ready {
             self.session.recovery_required();
+        } else if reset.is_some() {
+            let no_uncertain_failure = self.records.keys().all(|id| {
+                !matches!(
+                    self.session.requests.state(*id),
+                    Ok(crate::domain::models::RequestState::Failed {
+                        quiescent: false,
+                        ..
+                    })
+                )
+            });
+            if let Some(stall) = self.recoverable_stall.take()
+                && stall.device == device
+                && stall.endpoint == endpoint
+                && no_uncertain_failure
+            {
+                self.session.restore_scoped_recovery(stall.revision);
+            }
         }
         Ok(AbortReport {
             target,

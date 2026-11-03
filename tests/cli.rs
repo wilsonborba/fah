@@ -112,3 +112,32 @@ fn native_sigint_closes_idle_shell_with_valid_json() {
     assert_eq!(close["outcome"]["payload"]["reason"], "sigint");
     assert!(child.wait().unwrap().success());
 }
+
+#[cfg(feature = "hosted-direct")]
+#[test]
+fn independent_cli_processes_never_start_in_the_same_fixed_session() {
+    use std::{io::Write, process::Stdio};
+    let mut identities = Vec::new();
+    for _ in 0..2 {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_fah"))
+            .args(["shell", "--json"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"state\nquit\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let text = String::from_utf8(output.stdout).unwrap();
+        let frame: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        identities.push(frame["outcome"]["payload"]["session_id"].as_u64().unwrap());
+    }
+    assert_ne!(identities[0], identities[1]);
+}

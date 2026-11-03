@@ -32,6 +32,7 @@ pub struct DeviceSnapshot {
 }
 pub struct UsbSession<B: DeviceBackend> {
     pub session: Session<B>,
+    pub(crate) recoverable_stall: Option<super::recovery::RecoverableStall>,
     ports: Option<Ports>,
     reset_ports: BTreeMap<u8, PortId>,
     devices: BTreeMap<u8, DeviceSnapshot>,
@@ -45,6 +46,7 @@ impl<B: DeviceBackend> UsbSession<B> {
     pub fn new(backend: B, identity: u64) -> Self {
         Self {
             session: Session::new(backend, identity),
+            recoverable_stall: None,
             ports: None,
             reset_ports: BTreeMap::new(),
             devices: BTreeMap::new(),
@@ -236,6 +238,7 @@ impl<B: DeviceBackend> UsbSession<B> {
         self.interfaces.clear();
         self.endpoints.clear();
         self.records.clear();
+        self.recoverable_stall = None;
         Ok(())
     }
     pub(crate) fn effect<T>(
