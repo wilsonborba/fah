@@ -3,6 +3,7 @@
 import argparse
 import gzip
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -15,6 +16,25 @@ import tomllib
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 TARGET = 'x86_64-unknown-linux-gnu'
 ALLOWED = {'MIT', 'Apache-2.0', 'BSD-3-Clause', 'Unlicense', 'Unicode-3.0'}
+# The candidate package is generated build output, next to the executable but outside Cargo's profile directories.
+OUTPUT = ROOT / 'target' / 'fah-release'
+
+
+def load_preparation():
+    spec = importlib.util.spec_from_file_location('fah_prepare_dependencies', ROOT / 'scripts/prepare-dependencies.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+PREPARATION = load_preparation()
+
+
+def verified_sources():
+    """Compare the ignored dependency trees with the pinned sources and tracked patches (#60).
+
+    This is the preparation script's own check. It fetches and changes nothing; unknown edits stop the release."""
+    return PREPARATION.verify(ROOT)
 
 
 def command(*args):
@@ -128,7 +148,7 @@ def verified_runs(paths, commit, binary_hash):
         if not result['success'] or result['qemu_exit'] != 0 or manifest['commit'] != commit:
             raise ValueError(f'evidence is failed or from another release commit: {path.name}')
         if manifest['sources'].get(str(ROOT / 'target/release/fah')) != binary_hash:
-            raise ValueError('binary changed since VM validation; rebuild image and repeat required suites')
+            raise ValueError('the clean pinned rebuild differs from the VM-tested executable; build the payload with README\'s clean pinned command, prepare a new image and repeat the required suites')
         if result['suite'] == 'explicit':
             validation = json.loads((path / 'trace-validation.json').read_text())
             if len(validation) != 11 or {row.get('phase')for row in validation}!=TRACE_PHASES or not all(row['verified'] for row in validation):
@@ -155,14 +175,34 @@ def normalize_tar(info):
     return info
 
 
-def package(output, evidence, metadata, records):
+def pinned_toolchain():
+    """Return rust-toolchain.toml's channel. A rustup override can change the executable bytes (#63)."""
+    channel = tomllib.loads((ROOT / 'rust-toolchain.toml').read_text())['toolchain']['channel']
+    override = os.environ.get('RUSTUP_TOOLCHAIN')
+    if override not in (None, channel):
+        raise ValueError(f'unset RUSTUP_TOOLCHAIN={override}; the candidate builds only with the pinned {channel} toolchain')
+    return channel
+
+
+def build(sources):
+    """Rebuild the executable from nothing with the pinned toolchain; refuse it if the trees changed.
+
+    Cargo reuses artifacts by file time and treats same-version toolchains as equal (#63)."""
+    pinned_toolchain()
+    subprocess.run(['cargo', 'clean', '--locked', '--release'], cwd=ROOT, check=True)
+    subprocess.run(['cargo', 'build', '--locked', '--release', '--features', 'hosted-direct'], cwd=ROOT, check=True)
+    if verified_sources() != sources:
+        raise ValueError('dependency patches or trees changed during the build')
+
+
+def package(output, evidence, metadata, records, sources):
     clean_release()
     version = tomllib.loads((ROOT / 'Cargo.toml').read_text())['package']['version']
-    if version != '0.1.0' or not command('rustc', '--version').startswith('rustc 1.91.1 '):
+    if version != '0.1.0' or not command('rustc', '--version').startswith(f'rustc {pinned_toolchain()} '):
         raise ValueError('unexpected release version/toolchain')
     if pathlib.Path(metadata['target_directory']).resolve() != ROOT / 'target':
         raise ValueError('candidate uses the default target directory shared with the VM recipe')
-    subprocess.run(['cargo', 'build', '--locked', '--release', '--features', 'hosted-direct'], cwd=ROOT, check=True)
+    build(sources)
     binary = ROOT / 'target/release/fah'
     binary_hash = digest(binary)
     if command(str(binary), '--version') != 'fah ' + version:
@@ -208,9 +248,9 @@ def package(output, evidence, metadata, records):
                 shutil.copy2(run['_path'] / name, destination / name)
     source = subprocess.check_output(['git', 'archive', '--format=tar', '--prefix=fah-source/', 'HEAD'], cwd=ROOT)
     (stage / 'source.tar.gz').write_bytes(gzip.compress(source, mtime=0))
-    provenance = dict(version=version, target=TARGET, source_commit=commit, source_tree=command('git', 'rev-parse', 'HEAD^{tree}'), binary_sha256=binary_hash, cargo_lock_sha256=digest(ROOT / 'Cargo.lock'), patch_sha256={path.name: digest(path) for path in sorted((ROOT / 'patches').glob('*.patch'))}, rustc=command('rustc', '-Vv'), cargo=command('cargo', '--version'), rustflags=os.environ.get('RUSTFLAGS', ''), dynamic_libraries=re.sub(r'0x[0-9a-fA-F]+','<runtime-address>',command('ldd', str(binary))), build='cargo build --locked --release --features hosted-direct', normal_build_dependencies=len(records), evidence=[{key: value for key, value in run.items() if key != '_path'} for run in runs], physical_validated=False)
+    provenance = dict(version=version, target=TARGET, source_commit=commit, source_tree=command('git', 'rev-parse', 'HEAD^{tree}'), binary_sha256=binary_hash, cargo_lock_sha256=digest(ROOT / 'Cargo.lock'), patch_sha256={path.name: digest(path) for path in sorted((ROOT / 'patches').glob('*.patch'))}, dependency_sources=dict(sources, verified='before the dependency inventory and after the build'), rustc=command('rustc', '-Vv'), cargo=command('cargo', '--version'), rustflags=os.environ.get('RUSTFLAGS', ''), dynamic_libraries=re.sub(r'0x[0-9a-fA-F]+','<runtime-address>',command('ldd', str(binary))), build='cargo clean --locked --release && cargo build --locked --release --features hosted-direct', normal_build_dependencies=len(records), evidence=[{key: value for key, value in run.items() if key != '_path'} for run in runs], physical_validated=False)
     (stage / 'provenance.json').write_text(json.dumps(provenance, indent=2, ensure_ascii=False) + '\n')
-    notes = f'''# FAH v{version} — emulated preview candidate
+    notes = f'''# FAH v{version}: emulated preview candidate
 
 Source commit: {commit}
 Binary SHA256: {binary_hash}
@@ -220,6 +260,12 @@ The candidate includes the executable, source snapshot, maintained patches,
 license texts/notices, provenance/checksums and six fresh guest runs from this exact
 commit/binary. It validates control/bulk/interrupt I/O, eleven independent trace
 windows and eleven fault/recovery cases. See README and evidence manifests.
+
+Before the dependency inventory and again after a clean build with the pinned
+toolchain, the packaging tool compared every file of the prepared CrabUSB and
+dma-api trees with the pinned revision/archive plus the maintained patches
+(provenance.json, dependency_sources). That clean build reproduced the VM-tested
+executable byte for byte.
 
 Physical Intel behavior, physical process-death/isolation/timing, full DMA-model
 soundness, electrical Pico equivalence and iPad/A5 compatibility remain unverified.
@@ -245,13 +291,15 @@ create tags, merge branches or send an upstream PR.
     print(json.dumps(dict(candidate=str(stage), archive=str(archive), archive_sha256=digest(archive), binary_sha256=binary_hash, source_commit=commit, evidence_runs=len(runs))))
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['audit', 'candidate'])
     parser.add_argument('--write-notices', action='store_true')
-    parser.add_argument('--output', type=pathlib.Path, default=pathlib.Path.home() / '.cache/fah-release')
+    parser.add_argument('--output', type=pathlib.Path, default=OUTPUT)
     parser.add_argument('--evidence', type=pathlib.Path, action='append', default=[])
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    # Cargo metadata, license texts and the build all read these trees: verify them first.
+    sources = verified_sources()
     metadata, records = inventory()
     expected = notices(records)
     path = ROOT / 'THIRD_PARTY_NOTICES.md'
@@ -260,9 +308,9 @@ def main():
     elif not path.is_file() or path.read_text() != expected:
         raise ValueError('dependency notices are missing/stale; run audit --write-notices')
     if args.action == 'candidate':
-        package(args.output, args.evidence, metadata, records)
+        package(args.output, args.evidence, metadata, records, sources)
     else:
-        print(json.dumps(dict(reviewed_normal_build_dependencies=len(records), texts=sum(len(record['texts']) for record in records), notice_consistent=True)))
+        print(json.dumps(dict(reviewed_normal_build_dependencies=len(records), texts=sum(len(record['texts']) for record in records), notice_consistent=True, dependency_sources_verified=True)))
 
 
 if __name__ == '__main__':
