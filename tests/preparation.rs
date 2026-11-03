@@ -44,6 +44,7 @@ impl ControllerBackend for Fake {
             target: None,
             interrupt_mode: None,
             retained_allocations: 0,
+            close_stage: None,
         }
     }
     fn close(&mut self) -> Result<(), OperationError> {
