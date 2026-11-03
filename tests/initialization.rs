@@ -20,7 +20,7 @@ impl MappingProvider for Provider {
     }
 }
 #[test]
-fn dma_permission_hook_runs_after_reset_and_before_run_stop() {
+fn dma_permission_hook_runs_after_reset_and_before_dma_register_programming() {
     let layout = Layout::from_size_align(0x4000, 4096).unwrap();
     let base = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
     unsafe {
@@ -46,6 +46,12 @@ fn dma_permission_hook_runs_after_reset_and_before_run_stop() {
         let future = host.initialize_with_dma_hook(move || {
             let command = unsafe { ((address + 0x40) as *const u32).read_volatile() };
             assert_eq!(command & 3, 0);
+            let erstba =
+                unsafe { ((address + 0x1000 + 0x20 + 0x10) as *const u64).read_volatile() };
+            assert_eq!(
+                erstba, 0,
+                "DMA must be enabled before ERSTBA can fetch table entries"
+            );
             marker.store(true, Ordering::SeqCst);
             Ok(())
         });
