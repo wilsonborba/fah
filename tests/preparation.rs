@@ -666,3 +666,57 @@ fn explicit_plan_uses_same_request_ownership_and_rejects_stale_before_effect() {
     assert_eq!(usb.noop().unwrap()[2] >> 24, 1);
     usb.close().unwrap();
 }
+
+#[test]
+fn persistent_cli_keeps_one_owner_and_frames_failures_without_mutation() {
+    use fah::presentation::cli::{formatters::OutputMode, handlers::Handler, runtime};
+    let state = Arc::new(Mutex::new(State {
+        status: 3 | (1 << 9) | (1 << 10),
+        ..Default::default()
+    }));
+    let (tx, rx) = std::sync::mpsc::channel();
+    for line in [
+        "help",
+        r#"{"op":"open","target":"fake"}"#,
+        "state",
+        r#"{"op":"open","target":"other"}"#,
+        "{bad",
+        r#"{"op":"init","unknown":true}"#,
+        "init",
+        "state",
+        "close",
+    ] {
+        tx.send(Ok(line.into())).unwrap();
+    }
+    drop(tx);
+    let (mut out, mut err) = (vec![], vec![]);
+    assert_eq!(
+        runtime::run(
+            Handler::new(Fake(state.clone())),
+            rx,
+            &mut out,
+            &mut err,
+            OutputMode::Json
+        ),
+        1
+    );
+    assert!(err.is_empty());
+    let frames: Vec<serde_json::Value> = String::from_utf8(out)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(frames.len(), 10);
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame["schema_version"] == 1 && frame["kind"] == "response")
+    );
+    assert_eq!(frames[2]["session_state"], "acquired_unknown");
+    assert_eq!(frames[7]["session_state"], "initialized");
+    assert_eq!(frames[9]["session_state"], "closed");
+    assert_eq!(
+        state.lock().unwrap().trace,
+        ["acquire", "init-controller", "close"]
+    );
+}
