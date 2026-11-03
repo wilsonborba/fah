@@ -1,0 +1,11 @@
+trait-ffi0.2.11 notice
+
+Published author metadata: 周睿 <zrufo747@outlook.com>
+Repository: https://github.com/ZR233/trait-ffi
+Published VCS revision: 61379b7043341dced18b03245cc85a46aef85a33
+
+The package metadata and README declare MIT. Neither the published crate nor
+that repository revision contains a standalone full license text. The adjacent
+MIT text is supplied standard text with upstream-author/contributor attribution;
+it is not represented as an upstream-published LICENSE file. Published package
+metadata/authorship remain recorded in the release dependency manifest.

@@ -153,3 +153,19 @@ class ReplayTraceRegression(unittest.TestCase):
         text=one+one
         window=dict(kind='trace_window',name='plan',start=0,end=len(text),setup_wlength=8,data_trb_length=18)
         with self.assertRaisesRegex(AssertionError,'duplicate'):lab.validate_trace([window],text)
+
+
+class KernelInputRoot(unittest.TestCase):
+    def test_private_extracted_root_requires_matching_kernel_and_config(self):
+        import tempfile
+        import hashlib
+        with tempfile.TemporaryDirectory() as directory:
+            root=pathlib.Path(directory)
+            (root/'boot').mkdir()
+            kernel=root/'boot'/('vmlinuz-'+lab.KERNEL)
+            config=root/'boot'/('config-'+lab.KERNEL)
+            kernel.write_bytes(b'kernel');config.write_bytes(b'config')
+            expected=dict(kernel_sha256=hashlib.sha256(b'kernel').hexdigest(),config_sha256=hashlib.sha256(b'config').hexdigest())
+            self.assertEqual(lab.kernel_inputs(root,expected),(kernel,config))
+            config.write_bytes(b'changed')
+            with self.assertRaisesRegex(AssertionError,'config checksum'):lab.kernel_inputs(root,expected)

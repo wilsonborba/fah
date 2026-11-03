@@ -772,6 +772,24 @@ fn cli_explicit_usb_steps_and_async_wait_preserve_request_ownership() {
         json!({"op":"submit","request":{"device":device,"endpoint":129,"transfer_type":"interrupt","direction":"in","length":8,"setup":null}}),
     );
     let id: fah::domain::models::RequestId = serde_json::from_value(request["id"].clone()).unwrap();
+    let trace_before = state.lock().unwrap().trace.len();
+    let cached = handler.dispatch(ShellCommand::Devices).unwrap();
+    assert_eq!(cached["cached"], true);
+    assert_eq!(cached["devices"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        handler
+            .dispatch(ShellCommand::Requests)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        state.lock().unwrap().trace.len(),
+        trace_before,
+        "cached queries must not poll hardware"
+    );
     let accepted = handler.execute(ShellCommand::Wait { id, timeout_ms: 0 });
     assert!(matches!(accepted.result.outcome, Outcome::Pending));
     let events = handler.tick();
