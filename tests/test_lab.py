@@ -130,3 +130,18 @@ class ScsiVsUsbLength(unittest.TestCase):
         guest.validate_csw(raw,7,64,36)
         for candidate,tag,length,processed in [(raw,8,64,36),(raw,7,64,64),(raw[:-1]+bytes([1]),7,64,36)]:
             with self.assertRaises(AssertionError):guest.validate_csw(candidate,tag,length,processed)
+
+
+class TraceContracts(unittest.TestCase):
+    def test_passive_window_rejects_hidden_enumeration(self):
+        text=b'usb_xhci_fetch_trb addr 0x0, TR_SETUP, p 0x0008000001000680, s 0x00000008, c 0x00030841\n'
+        window=dict(kind='trace_window',name='passive',start=0,end=len(text),forbid=['TR_SETUP'])
+        with self.assertRaises(AssertionError):lab.validate_trace([window],text)
+
+    def test_trace_extracts_wire_length_independently_and_compares_flows(self):
+        text=b'usb_xhci_fetch_trb addr 0x0, TR_SETUP, p 0x0008000001000680, s 0x00000008, c 0x00030841\nusb_xhci_fetch_trb addr 0x10, TR_DATA, p 0x10000, s 0x00000012, c 0x00010c01\n'
+        first=dict(kind='trace_window',name='explicit',start=0,end=len(text),setup_wlength=8,data_trb_length=18)
+        second=dict(kind='trace_window',name='convenience',start=0,end=len(text),equivalent_to='explicit')
+        self.assertEqual(len(lab.validate_trace([first,second],text)),2)
+        first['data_trb_length']=8
+        with self.assertRaises(AssertionError):lab.validate_trace([first],text)
