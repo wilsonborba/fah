@@ -121,10 +121,11 @@ guest kernel, virtual PCI controller and virtual-IOMMU/VFIO topology.
 ### Obtain guest kernel inputs without a host installation
 
 The lab can read an already installed matching kernel, or a privately extracted
-Debian package. The latter changes only the selected cache directory:
+Debian package. The latter writes only to the selected directory inside the ignored
+`target/` of this checkout. Run it from the repository root:
 
 ```sh
-export FAH_KERNEL_DIR="$HOME/.cache/fah-kernel-inputs"
+export FAH_KERNEL_DIR="$PWD/target/fah-lab/kernel-inputs"
 mkdir -p "$FAH_KERNEL_DIR"
 curl --fail --location --output "$FAH_KERNEL_DIR/linux-image.deb" \
   'https://security.debian.org/debian-security/pool/updates/main/l/linux-signed-amd64/linux-image-6.12.95+deb13-amd64_6.12.95-1_amd64.deb'
@@ -182,9 +183,16 @@ The fault suite pauses only the **guest child's event thread** for its uncertain
 case, resumes it before teardown, and kills only a guest FAH child for SIGKILL testing.
 Its process-death result describes the observed guest VFIO/kernel behavior.
 
-Artifacts persist on disk in `~/.cache/fah-lab/runs/<run>`: exact QEMU command,
-source/image manifest, serial/CLI frames, PCI/VFIO metadata, `xhci.trace`, suite result
-and, where applicable, `trace-validation.json` or `failure-matrix.json`. The emulator
+Generated files stay inside the checkout and are ignored by Git:
+
+| Location | Contents |
+| --- | --- |
+| `target/fah-lab/` | image, kernel copy, rootfs, image manifest and private kernel inputs |
+| `target/fah-lab/runs/<run>/` | runtime state of one run: synthetic disk, QMP socket and PID |
+| `docs/evidence/<run>/` | evidence of one run: exact QEMU command, source/image manifest, serial/CLI frames, PCI/VFIO metadata, `xhci.trace` and its event list, suite result and, where applicable, `trace-validation.json` or `failure-matrix.json` |
+| `target/fah-release/` | candidate package, see below |
+
+`cargo clean` deletes `target/`, but not the evidence in `docs/evidence/`. The emulator
 trace is independent of FAH logging and is not a physical USB analyzer capture.
 
 ```sh
@@ -194,7 +202,8 @@ python3 scripts/lab.py cleanup --run <generated-run-directory-name>
 
 Stop validates that the recorded PID belongs to that generated QEMU. Cleanup requires
 its marker and a stopped process; it refuses unrelated/reused PIDs and arbitrary paths.
-Artifacts/builds belong outside `/tmp`; tmpfs-backed lab directories are rejected.
+Cleanup deletes only the runtime state and keeps the evidence. The checkout, and with
+it every lab directory, must be on disk; `/tmp` and tmpfs-backed lab directories are rejected.
 
 ## Persistent CLI and JSON protocol
 
@@ -414,7 +423,7 @@ runs, package their exact generated directories:
 python3 scripts/release.py candidate --evidence <feasibility-run> --evidence <fixture-run> --evidence <smoke-run-1> --evidence <smoke-run-2> --evidence <explicit-run> --evidence <faults-run>
 ```
 
-Each evidence argument is an absolute path under the generated lab runs. Packaging
+Each evidence argument is an absolute `docs/evidence/<run>` path. Packaging
 requires the same source commit and executable hash as every selected run. It verifies
 the eleven trace windows/failure rows and refuses failed, stale or incomplete evidence.
 Both `audit` and `candidate` first run the `--check` comparison above, before Cargo
@@ -422,7 +431,7 @@ metadata or license texts are read. The candidate refuses a `RUSTUP_TOOLCHAIN`
 override, removes the release profile, rebuilds from the verified trees, repeats the
 comparison and records it in `provenance.json`. The rebuilt executable must equal the
 VM-tested one. Unknown dependency edits stop packaging.
-Artifacts default to `~/.cache/fah-release/`; `SHA256SUMS`, sidecar archive checksum,
+Artifacts default to `target/fah-release/`; `SHA256SUMS`, sidecar archive checksum,
 `provenance.json`, `dependency-licenses.json` and `RELEASE-NOTES.md` are included.
 The binary is tested for the recorded Linux/userspace/toolchain; arbitrary-host byte
 identity or ABI compatibility is not promised.

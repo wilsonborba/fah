@@ -20,7 +20,9 @@ import time
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 KERNEL = '6.12.95+deb13-amd64'
 MACHINE = 'pc-q35-10.0'
-DEFAULT_LAB = pathlib.Path.home() / '.cache/fah-lab'
+# Generated VM files and runtime state are build output; completed run evidence is local, untracked documentation.
+DEFAULT_LAB = ROOT / 'target' / 'fah-lab'
+EVIDENCE = ROOT / 'docs' / 'evidence'
 
 
 def command(*args):
@@ -188,22 +190,30 @@ stty raw -echo < /dev/ttyS0
     print(json.dumps({'prepared': str(lab), 'run_id': run_id, 'initramfs_bytes': (lab / 'initramfs.gz').stat().st_size}))
 
 
-def run(lab, suite):
+def run_directories(lab, evidence, suite):
+    """One run: runtime state (disk, QMP socket, PID) under the lab, its evidence record under docs/evidence."""
+    name = f'{time.time_ns()}-{suite}'
+    runtime, record = lab / 'runs' / name, evidence / name
+    for directory in (runtime, record):
+        directory.mkdir(parents=True)
+        (directory / '.fah-lab-run').touch()
+    return runtime, record
+
+
+def run(lab, suite, evidence=EVIDENCE):
     release_only()
     inventory(lab)
     manifest = json.loads((lab / 'manifest.json').read_text())
     assert digest(lab / 'initramfs.gz') == manifest['initramfs_sha256'], 'initramfs checksum mismatch'
     assert digest(lab / 'kernel') == manifest['kernel_sha256'], 'kernel checksum mismatch'
     assert manifest['commit'] == command('git', '-C', str(ROOT), 'rev-parse', 'HEAD'), 'rebuild initramfs for current release commit'
-    run_dir = lab / 'runs' / f'{time.time_ns()}-{suite}'
-    run_dir.mkdir(parents=True)
-    (run_dir / '.fah-lab-run').touch()
+    runtime, run_dir = run_directories(lab, evidence, suite)
     shutil.copy2(lab / 'manifest.json', run_dir / 'manifest.json')
-    disk=run_dir/'synthetic-usb.raw'
+    disk=runtime/'synthetic-usb.raw'
     with disk.open('wb')as fixture:
         fixture.write(bytes(range(256))*2)
         fixture.truncate(8*1024*1024)
-    qmp_path=run_dir/'qmp.sock'
+    qmp_path=runtime/'qmp.sock'
     trace_path=run_dir/'xhci.trace'
     trace_events=run_dir/'trace-events'
     trace_events.write_text('\n'.join(['usb_xhci_port_write','usb_xhci_runtime_write','usb_xhci_oper_write','usb_xhci_irq_msix','usb_xhci_fetch_trb','usb_xhci_slot_enable','usb_xhci_slot_address','usb_xhci_slot_configure','usb_xhci_port_reset','usb_xhci_ep_stop','usb_xhci_ep_reset','usb_xhci_ep_set_dequeue','usb_xhci_xfer_success','usb_xhci_xfer_error','usb_xhci_queue_event'])+'\n')
@@ -213,7 +223,7 @@ def run(lab, suite):
     events = []
     with (run_dir / 'qemu.stderr').open('wb') as errors, (run_dir / 'serial.log').open('wb') as serial:
         process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors,umask=0o077)
-        (run_dir/"pid").write_text(str(process.pid))
+        (runtime/"pid").write_text(str(process.pid))
         qmp=None
         try:
             deadline=time.monotonic()+5
@@ -273,7 +283,7 @@ def run(lab, suite):
         result=result and len(matrix)==11 and all(row['verified']for row in matrix)
     (run_dir / 'events.json').write_text(json.dumps(events, indent=2))
     (run_dir / 'result.json').write_text(json.dumps({'success': result, 'qemu_exit': process.returncode, 'suite': suite, 'evidence': 'emulated_only'}))
-    print(json.dumps({'artifacts': str(run_dir), 'success': result}))
+    print(json.dumps({'artifacts': str(run_dir), 'runtime': str(runtime), 'success': result}))
     return 0 if result and process.returncode == 0 else 1
 
 

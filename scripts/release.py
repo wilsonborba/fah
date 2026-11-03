@@ -16,6 +16,8 @@ import tomllib
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 TARGET = 'x86_64-unknown-linux-gnu'
 ALLOWED = {'MIT', 'Apache-2.0', 'BSD-3-Clause', 'Unlicense', 'Unicode-3.0'}
+# The candidate package is generated build output, next to the executable but outside Cargo's profile directories.
+OUTPUT = ROOT / 'target' / 'fah-release'
 
 
 def load_preparation():
@@ -293,7 +295,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['audit', 'candidate'])
     parser.add_argument('--write-notices', action='store_true')
-    parser.add_argument('--output', type=pathlib.Path, default=pathlib.Path.home() / '.cache/fah-release')
+    parser.add_argument('--output', type=pathlib.Path, default=OUTPUT)
     parser.add_argument('--evidence', type=pathlib.Path, action='append', default=[])
     args = parser.parse_args(argv)
     # Cargo metadata, license texts and the build all read these trees: verify them first.
