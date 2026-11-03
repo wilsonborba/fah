@@ -96,10 +96,10 @@ index 71b939e..4ab690c 100644
 -    }
 -}
 diff --git a/usb-host/src/backend/kmod/mod.rs b/usb-host/src/backend/kmod/mod.rs
-index e17466d..8f8777a 100644
+index e17466d..0ab8707 100644
 --- a/usb-host/src/backend/kmod/mod.rs
 +++ b/usb-host/src/backend/kmod/mod.rs
-@@ -50,3 +50,127 @@ pub struct DeviceAddressInfo {
+@@ -50,3 +50,145 @@ pub struct DeviceAddressInfo {
      pub port_id: u8,
      pub infos: BTreeMap<Id<Hub>, HubInfo>,
  }
@@ -215,6 +215,15 @@ index e17466d..8f8777a 100644
 +    pub async fn rebuild_stopped_endpoint(&mut self,slot:u8,endpoint:u8)->Result<()> {
 +        self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.explicit_rebuild_endpoint(endpoint).await
 +    }
++    pub fn submit_control_plan(&mut self,slot:u8,request:usb_if::endpoint::TransferRequest,fields:ExplicitControlFields)->Result<usb_if::endpoint::RequestId> {
++        self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.explicit_submit_plan(request,fields)
++    }
++    pub async fn reset_endpoint(&mut self,slot:u8,endpoint:u8,preserve:bool)->Result<()> {
++        self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.explicit_reset_endpoint(endpoint,preserve).await
++    }
++    pub async fn noop(&mut self)->[u32;4] {
++        self.core.cmd.cmd_request_raw(::xhci::ring::trb::command::Noop::new().into()).await.into_raw()
++    }
 +    pub fn event_handler(&mut self)->crate::EventHandler {
 +        crate::EventHandler::from_inner(self.core.create_event_handler())
 +    }
@@ -227,6 +236,15 @@ index e17466d..8f8777a 100644
 +    pub result:core::result::Result<usb_if::endpoint::TransferCompletion,usb_if::err::TransferError>,
 +    pub completion_code:Option<u32>,
 +}
++
++#[derive(Clone,Copy)]
++pub struct ExplicitControlFields {
++    pub setup:[u8;8],pub data_stage:bool,
++    pub data_direction:usb_if::transfer::Direction,
++    pub status_direction:usb_if::transfer::Direction,
++}
++
++pub use xhci::cmd::CommandFailure;
 diff --git a/usb-host/src/backend/kmod/transfer.rs b/usb-host/src/backend/kmod/transfer.rs
 index 7efe34d..9354d97 100644
 --- a/usb-host/src/backend/kmod/transfer.rs
@@ -242,6 +260,62 @@ index 7efe34d..9354d97 100644
                      .map_err(|err| TransferError::Other(anyhow!("DMA mapping failed: {err}")))?,
              )
          } else {
+diff --git a/usb-host/src/backend/kmod/xhci/cmd.rs b/usb-host/src/backend/kmod/xhci/cmd.rs
+index 27f0aca..183155f 100644
+--- a/usb-host/src/backend/kmod/xhci/cmd.rs
++++ b/usb-host/src/backend/kmod/xhci/cmd.rs
+@@ -9,7 +9,7 @@ use xhci::{
+ };
+ 
+ use super::{reg::XhciRegisters, ring::SendRing};
+-use crate::{err::ConvertXhciError, osal::Kernel, queue::Finished};
++use crate::{osal::Kernel, queue::Finished};
+ 
+ #[derive(Clone)]
+ pub struct CommandRing(Arc<Mutex<Inner>>);
+@@ -44,6 +44,12 @@ impl CommandRing {
+         &mut self,
+         trb: command::Allowed,
+     ) -> Result<CommandCompletion, TransferError> {
++        let result = self.cmd_request_raw(trb).await;
++        validate_command_code(result.into_raw()[2] >> 24)?;
++        Ok(result)
++    }
++
++    pub async fn cmd_request_raw(&mut self,trb:command::Allowed)->CommandCompletion {
+         let fur = {
+             let mut inner = self.0.lock();
+             let trb_addr = inner.ring.enque_command(trb);
+@@ -57,14 +63,7 @@ impl CommandRing {
+             fur
+         };
+ 
+-        let res = fur.await;
+-
+-        match res.completion_code() {
+-            Ok(code) => code.to_result()?,
+-            Err(e) => Err(TransferError::Other(anyhow!("Command failed: {e:?}")))?,
+-        }
+-
+-        Ok(res)
++        fur.await
+     }
+ }
+ 
+@@ -72,3 +71,13 @@ struct Inner {
+     ring: SendRing<CommandCompletion>,
+     reg: Arc<RwLock<XhciRegisters>>,
+ }
++
++#[derive(Debug)]
++pub struct CommandFailure {pub code:u32}
++impl core::fmt::Display for CommandFailure {fn fmt(&self,f:&mut core::fmt::Formatter<'_>)->core::fmt::Result {write!(f,"xHCI command completion code {}",self.code)}}
++impl core::error::Error for CommandFailure {}
++fn validate_command_code(code:u32)->Result<(),TransferError> {
++    if code==1 {Ok(())} else {Err(TransferError::Other(anyhow!(CommandFailure{code})))}
++}
++#[cfg(test)]
++mod command_codes {use super::*;#[test]fn only_success_is_command_success(){assert!(validate_command_code(1).is_ok());for code in [0,6,13,19,255] {let Err(TransferError::Other(error))=validate_command_code(code) else{panic!("accepted command failure")};assert_eq!(error.downcast_ref::<CommandFailure>().unwrap().code,code);}}}
 diff --git a/usb-host/src/backend/kmod/xhci/context.rs b/usb-host/src/backend/kmod/xhci/context.rs
 index 900eaad..ab5ca53 100644
 --- a/usb-host/src/backend/kmod/xhci/context.rs
@@ -269,10 +343,10 @@ index 900eaad..ab5ca53 100644
          match self {
              ContextData::Context32(ctx) => ctx.out.dma_addr(),
 diff --git a/usb-host/src/backend/kmod/xhci/device.rs b/usb-host/src/backend/kmod/xhci/device.rs
-index a7996fc..376d45f 100644
+index a7996fc..287776b 100644
 --- a/usb-host/src/backend/kmod/xhci/device.rs
 +++ b/usb-host/src/backend/kmod/xhci/device.rs
-@@ -159,30 +159,97 @@ impl Device {
+@@ -159,30 +159,108 @@ impl Device {
          Ok(())
      }
  
@@ -345,6 +419,9 @@ index a7996fc..376d45f 100644
 +    pub(crate) fn explicit_submit(&mut self,address:u8,request:usb_if::endpoint::TransferRequest)->Result<usb_if::endpoint::RequestId> {
 +        Ok(self.explicit_endpoint_mut(address)?.submit(request)?)
 +    }
++    pub(crate) fn explicit_submit_plan(&mut self,request:usb_if::endpoint::TransferRequest,fields:crate::ExplicitControlFields)->Result<usb_if::endpoint::RequestId> {
++        Ok(self.explicit_endpoint_mut(0)?.with_raw_mut::<XhciEndpoint,_>(|ep|ep.submit_control_plan(request,fields))?)
++    }
 +    pub(crate) fn explicit_request_dma(&mut self,address:u8,id:usb_if::endpoint::RequestId)->Result<Option<u64>> {
 +        Ok(self.explicit_endpoint_mut(address)?.with_raw_mut::<XhciEndpoint,_>(|ep|ep.pending_dma_address(id)))
 +    }
@@ -359,6 +436,14 @@ index a7996fc..376d45f 100644
 +        self.explicit_endpoint_mut(address)?.with_raw_mut::<XhciEndpoint,_>(|ep|ep.begin_stop());
 +        self.cmd.cmd_request(explicit_stop_command(self.id.as_u8(),dci)).await?;
 +        if self.ctx.endpoint_state_raw(dci as usize)!=3 {return Err(usb_if::err::USBError::Other(anyhow!("stop completion did not establish Stopped endpoint state")));}
++        self.explicit_endpoint_mut(address)?.with_raw_mut::<XhciEndpoint,_>(|ep|ep.confirm_stop());Ok(())
++    }
++    pub(crate) async fn explicit_reset_endpoint(&mut self,address:u8,preserve:bool)->Result<()> {
++        let dci=explicit_endpoint_dci(address);
++        if self.ctx.endpoint_state_raw(dci as usize)!=2 {return Err(usb_if::err::USBError::InvalidParameter);}
++        self.explicit_endpoint_mut(address)?.with_raw_mut::<XhciEndpoint,_>(|ep|ep.begin_stop());
++        self.cmd.cmd_request(explicit_reset_command(self.id.as_u8(),dci,preserve)).await?;
++        if self.ctx.endpoint_state_raw(dci as usize)!=3 {return Err(usb_if::err::USBError::Other(anyhow!("reset did not establish Stopped endpoint state")));}
 +        self.explicit_endpoint_mut(address)?.with_raw_mut::<XhciEndpoint,_>(|ep|ep.confirm_stop());Ok(())
 +    }
 +    pub(crate) fn explicit_discard_stopped(&mut self,address:u8)->Result<()> {
@@ -386,7 +471,7 @@ index a7996fc..376d45f 100644
          // 直接使用 DeviceSpeed 枚举计算默认 max packet size
          let max_packet_size = parse_default_max_packet_size_from_port_speed(info.port_speed);
  
-@@ -329,11 +396,7 @@ impl Device {
+@@ -329,11 +407,7 @@ impl Device {
          let input_bus_addr = self.ctx.input_bus_addr();
          trace!("Input context bus address: {input_bus_addr:#x?}");
          let result = host
@@ -399,7 +484,7 @@ index a7996fc..376d45f 100644
              .await?;
  
          debug!("Address slot ok {result:x?}");
-@@ -348,12 +411,10 @@ impl Device {
+@@ -348,12 +422,10 @@ impl Device {
      async fn get_device_descriptor_base(&mut self) -> Result<DeviceDescriptorBase> {
          let mut data = vec![0u8; 8];
  
@@ -416,7 +501,7 @@ index a7996fc..376d45f 100644
  
          Ok(desc)
      }
-@@ -528,7 +589,7 @@ impl Device {
+@@ -528,7 +600,7 @@ impl Device {
              input
                  .device_mut()
                  .slot_mut()
@@ -425,7 +510,7 @@ index a7996fc..376d45f 100644
          });
          mb();
  
-@@ -765,3 +826,78 @@ impl DeviceOp for Device {
+@@ -765,3 +837,84 @@ impl DeviceOp for Device {
          self.update_hub_inner(params).boxed()
      }
  }
@@ -504,29 +589,36 @@ index a7996fc..376d45f 100644
 +        assert_eq!(explicit_endpoint_dci(0),1);assert_eq!(explicit_endpoint_dci(0x81),3);assert_eq!(explicit_endpoint_dci(2),4);
 +    }
 +}
++
++fn explicit_reset_command(slot:u8,dci:u8,preserve:bool)->command::Allowed {
++    let mut cmd=command::ResetEndpoint::new();cmd.set_slot_id(slot).set_endpoint_id(dci);
++    if preserve {cmd.set_transfer_state_preserve();}cmd.into()
++}
++#[cfg(test)]mod reset_encoding {use super::*;#[test]fn preserve_changes_only_tsp(){let clear=explicit_reset_command(3,7,false).into_raw();let keep=explicit_reset_command(3,7,true).into_raw();assert_eq!(clear[3]>>24,3);assert_eq!((clear[3]>>16)&31,7);assert_eq!(keep[3]^clear[3],1<<9);assert_eq!(clear[3]&(1<<9),0);}}
 diff --git a/usb-host/src/backend/kmod/xhci/endpoint.rs b/usb-host/src/backend/kmod/xhci/endpoint.rs
-index 5c11453..a56e7c1 100644
+index 5c11453..628845f 100644
 --- a/usb-host/src/backend/kmod/xhci/endpoint.rs
 +++ b/usb-host/src/backend/kmod/xhci/endpoint.rs
-@@ -95,6 +95,9 @@ pub struct Endpoint {
+@@ -95,6 +95,10 @@ pub struct Endpoint {
      pub ring: SendRing<TransferEvent>,
      bell: Arc<Mutex<SlotBell>>,
      next_request_id: u64,
 +    last_completion:Option<(u64,u32)>,
 +    paused:bool,
 +    stop_confirmed:bool,
++    control_override:Option<crate::ExplicitControlFields>,
      inflight: BTreeMap<EndpointRequestId, SubmittedTd>,
      trb_to_request: BTreeMap<TransferId, EndpointRequestId>,
      outstanding_trbs: usize,
-@@ -121,6 +124,7 @@ impl Endpoint {
+@@ -121,6 +125,7 @@ impl Endpoint {
              ring,
              bell,
              next_request_id: 1,
-+            last_completion:None,paused:false,stop_confirmed:false,
++            last_completion:None,paused:false,stop_confirmed:false,control_override:None,
              inflight: BTreeMap::new(),
              trb_to_request: BTreeMap::new(),
              outstanding_trbs: 0,
-@@ -133,6 +137,27 @@ impl Endpoint {
+@@ -133,6 +138,32 @@ impl Endpoint {
          })
      }
  
@@ -551,10 +643,15 @@ index 5c11453..a56e7c1 100644
 +        self.ring=new;self.last_completion=None;Ok(self.ring.bus_addr())
 +    }
 +    pub(crate) fn resume_rebased(&mut self) {self.paused=false;}
++    pub(crate) fn submit_control_plan(&mut self,request:TransferRequest,fields:crate::ExplicitControlFields)->Result<RequestId,TransferError> {
++        if !matches!(request,TransferRequest::Control{..}){return Err(TransferError::InvalidEndpoint);}
++        self.control_override=Some(fields);
++        let result=self.submit_request(request);self.control_override=None;result
++    }
      pub fn configure_periodic(
          &mut self,
          max_packet_size: usize,
-@@ -215,12 +240,7 @@ impl Endpoint {
+@@ -215,12 +246,7 @@ impl Endpoint {
          Ok(())
      }
  
@@ -568,7 +665,7 @@ index 5c11453..a56e7c1 100644
          let submitted = self.inflight.remove(&request_id).ok_or_else(|| {
              warn!(
                  "xhci: completion for missing request dci={} request_id={} event_trb={:#x}",
-@@ -230,6 +250,7 @@ impl Endpoint {
+@@ -230,6 +256,7 @@ impl Endpoint {
              );
              TransferError::InvalidEndpoint
          })?;
@@ -576,7 +673,7 @@ index 5c11453..a56e7c1 100644
          self.outstanding_trbs = self.outstanding_trbs.saturating_sub(submitted.trb_count);
          match &submitted.kind {
              SubmittedTdKind::Normal { completion_trb } => {
-@@ -247,6 +268,16 @@ impl Endpoint {
+@@ -247,6 +274,16 @@ impl Endpoint {
              }
          }
  
@@ -593,7 +690,7 @@ index 5c11453..a56e7c1 100644
          if submitted.cancelled {
              return Err(TransferError::Cancelled);
          }
-@@ -303,7 +334,7 @@ impl Endpoint {
+@@ -303,7 +340,7 @@ impl Endpoint {
              }
              SubmittedTdKind::Normal { .. } => {
                  let remaining = event.trb_transfer_length() as usize;
@@ -602,7 +699,7 @@ index 5c11453..a56e7c1 100644
              }
              SubmittedTdKind::Iso { .. } => unreachable!("ISO was handled above"),
          };
-@@ -327,6 +358,11 @@ impl Endpoint {
+@@ -327,6 +364,11 @@ impl Endpoint {
                  continue;
              };
              let remaining = event.trb_transfer_length() as usize;
@@ -614,7 +711,7 @@ index 5c11453..a56e7c1 100644
              if let Some(submitted) = self.inflight.get_mut(&request_id)
                  && let SubmittedTdKind::Control(control_td) = &mut submitted.kind
              {
-@@ -334,7 +370,7 @@ impl Endpoint {
+@@ -334,7 +376,7 @@ impl Endpoint {
                      ControlStage::Setup => {}
                      ControlStage::Data => {
                          control_td.actual =
@@ -623,16 +720,23 @@ index 5c11453..a56e7c1 100644
                      }
                      ControlStage::Status if control_td.actual.is_none() => {
                          control_td.actual = Some(control_td.requested);
-@@ -597,6 +633,8 @@ impl Endpoint {
+@@ -597,10 +639,13 @@ impl Endpoint {
  
  impl EndpointOp for Endpoint {
      fn submit_request(&mut self, request: TransferRequest) -> Result<RequestId, TransferError> {
+-        let required_trbs = Self::required_trbs_for_request(&request);
 +        if self.paused {return Err(TransferError::Other(anyhow!("endpoint paused; recovery required")));}
 +        self.stop_confirmed=false;
-         let required_trbs = Self::required_trbs_for_request(&request);
++        let control_fields=self.control_override.take();
++        let required_trbs=control_fields.map_or_else(||Self::required_trbs_for_request(&request),|fields|if fields.data_stage{3}else{2});
          self.ensure_ring_capacity(required_trbs)?;
          let transfer = Transfer::from_request(&self.kernel, request)?;
-@@ -608,10 +646,10 @@ impl EndpointOp for Endpoint {
+-        debug_assert_eq!(required_trbs, Self::required_trbs(&transfer));
++        if control_fields.is_none(){debug_assert_eq!(required_trbs, Self::required_trbs(&transfer));}
+ 
+         let mut data_bus_addr = 0;
+         if transfer.buffer_len() > 0 {
+@@ -608,10 +653,10 @@ impl EndpointOp for Endpoint {
                  transfer.confirm_write_all();
              }
              data_bus_addr = transfer.dma_addr();
@@ -646,7 +750,51 @@ index 5c11453..a56e7c1 100644
                      data_bus_addr,
                      buffer_end,
                      self.kernel.dma_mask()
-@@ -882,3 +920,36 @@ impl EndpointDescriptorExt for EndpointDescriptor {
+@@ -642,30 +687,34 @@ impl EndpointOp for Endpoint {
+ 
+                 let mut data = None;
+ 
+-                if transfer.buffer_len() > 0 {
++                let data_direction=control_fields.map_or(dir,|fields|fields.data_direction);
++                if control_fields.map_or(transfer.buffer_len()>0,|fields|fields.data_stage) {
+                     setup
+-                        .set_transfer_type(dir.to_xhci_transfer_type())
++                        .set_transfer_type(data_direction.to_xhci_transfer_type())
+                         .set_length(data_len as _);
+ 
+                     let mut _data = transfer::DataStage::default();
+                     _data
+                         .set_data_buffer_pointer(data_bus_addr)
+                         .set_trb_transfer_length(data_len as _)
+-                        .set_direction(transfer.direction.to_xhci_direction());
+-                    if matches!(transfer.direction, Direction::In) {
++                        .set_direction(data_direction.to_xhci_direction());
++                    if matches!(data_direction, Direction::In) {
+                         _data.set_interrupt_on_short_packet();
+                     }
+                     data = Some(_data);
+                 }
+ 
++                if let Some(fields)=control_fields {
++                    setup.set_request_type(fields.setup[0]).set_request(fields.setup[1])
++                        .set_value(u16::from_le_bytes([fields.setup[2],fields.setup[3]]))
++                        .set_index(u16::from_le_bytes([fields.setup[4],fields.setup[5]]))
++                        .set_length(u16::from_le_bytes([fields.setup[6],fields.setup[7]]));
++                }
+                 let mut status = transfer::StatusStage::default();
+                 status.set_interrupt_on_completion();
+ 
+-                if matches!(transfer.direction, Direction::In) && transfer.buffer_len() > 0 {
+-                    status.clear_direction();
+-                } else {
+-                    status.set_direction();
+-                }
++                let status_direction=control_fields.map_or_else(||if matches!(dir,Direction::In)&&data.is_some(){Direction::Out}else{Direction::In},|fields|fields.status_direction);
++                if matches!(status_direction,Direction::In){status.set_direction();}else{status.clear_direction();}
+ 
+                 let has_data_stage = data.is_some();
+                 let mut control_trbs: Vec<transfer::Allowed> = vec![setup.into()];
+@@ -882,3 +931,61 @@ impl EndpointDescriptorExt for EndpointDescriptor {
          }
      }
  }
@@ -683,8 +831,33 @@ index 5c11453..a56e7c1 100644
 +        assert!(checked_actual_length(0,1).is_err());
 +    }
 +}
++
++#[cfg(all(test,feature="hosted-direct"))]
++mod explicit_stage_tests {
++ use super::*;
++ use super::super::{event::access_tests::MEMORY,reg::XhciRegisters};
++ use core::ptr::NonNull;
++ use usb_if::{host::ControlSetup,transfer::{RequestType,Recipient,Request},endpoint::TransferBuffer};
++ fn request(buffer:&mut[u8])->TransferRequest {TransferRequest::Control{setup:ControlSetup{request_type:RequestType::Vendor,recipient:Recipient::Device,request:Request::from(85),value:0,index:0},direction:Direction::In,buffer:TransferBuffer::from_mut_slice(buffer)}}
++ #[test] fn actual_ring_preserves_independent_stages_and_ordinary_path(){
++  #[repr(align(4096))]struct Mmio([u8;65536]);let mut mmio=std::boxed::Box::new(Mmio([0;65536]));let base=mmio.0.as_mut_ptr();
++  unsafe{(base as*mut u32).write(0x01000040);(base.add(4)as*mut u32).write((2<<24)|(1<<8)|8);(base.add(0x14)as*mut u32).write(0x2000);(base.add(0x18)as*mut u32).write(0x3000);}
++  let registers=XhciRegisters::new(NonNull::new(base).unwrap());
++  let bell=Arc::new(Mutex::new(SlotBell::new(1.into(),registers)));
++  let kernel=Kernel::new(u64::MAX,&MEMORY);let mut ep=Endpoint::new(Dci::CTRL,&kernel,bell).unwrap();
++  let fields=crate::ExplicitControlFields{setup:[0x40,85,0x34,0x12,0x78,0x56,42,0],data_stage:false,data_direction:Direction::In,status_direction:Direction::In};
++  ep.submit_control_plan(request(&mut[]),fields).unwrap();
++  let words=ep.bus_addr().raw()as*const u32;
++  let read=|trb:usize,dword:usize|unsafe{words.add(trb*4+dword).read_volatile()};
++  assert_eq!(read(0,0),0x12345540);assert_eq!(read(0,1),0x002a5678);assert_eq!(read(0,2)&0x1ffff,8);assert_eq!(read(0,3)>>16&3,0);assert_eq!(read(1,3)&(1<<16),1<<16);
++  let mut bytes=[0u8;8];let data_fields=crate::ExplicitControlFields{data_stage:true,..fields};
++  ep.submit_control_plan(request(&mut bytes),data_fields).unwrap();
++  assert_eq!(read(2,1)>>16,42);assert_eq!(read(2,3)>>16&3,3);assert_eq!(read(3,2)&0x1ffff,8);assert_eq!(read(3,3)&(1<<16),1<<16);
++  ep.submit_request(request(&mut bytes)).unwrap();assert_eq!(read(5,1)>>16,8);assert_eq!(read(7,3)&(1<<16),0);
++ }
++}
 diff --git a/usb-host/src/backend/kmod/xhci/event.rs b/usb-host/src/backend/kmod/xhci/event.rs
-index 27eeae2..12f8e2b 100644
+index 27eeae2..f31f85e 100644
 --- a/usb-host/src/backend/kmod/xhci/event.rs
 +++ b/usb-host/src/backend/kmod/xhci/event.rs
 @@ -60,7 +60,7 @@ impl EventRing {
@@ -737,17 +910,17 @@ index 27eeae2..12f8e2b 100644
      }
  
      fn inc_deque(&mut self) {
-@@ -137,3 +144,60 @@ pub struct EventRingInfo {
+@@ -137,3 +144,63 @@ pub struct EventRingInfo {
      pub erdp: u64,
      pub erstba: u64,
  }
 +
 +#[cfg(all(test, feature = "hosted-direct"))]
-+mod access_tests {
++pub(crate) mod access_tests {
 +    use super::*;
 +    use crate::osal::{DmaAddr,DmaHandle,DmaMapHandle,DmaError,DmaOp,KernelOp};
 +    use core::{alloc::Layout, num::NonZeroUsize, ptr::NonNull, time::Duration};
-+    struct Memory;
++    pub(crate) struct Memory;
 +    impl DmaOp for Memory {
 +        fn page_size(&self)->usize {4096}
 +        unsafe fn alloc_coherent(&self,_:u64,layout:Layout)->Option<DmaHandle> {
@@ -757,11 +930,14 @@ index 27eeae2..12f8e2b 100644
 +        unsafe fn dealloc_coherent(&self,h:DmaHandle) {
 +            unsafe {std::alloc::dealloc(h.as_ptr().as_ptr(),h.layout());}
 +        }
-+        unsafe fn map_single(&self,_:u64,_:NonNull<u8>,_:NonZeroUsize,_:usize,_:DmaDirection)->core::result::Result<DmaMapHandle,DmaError> {unreachable!()}
-+        unsafe fn unmap_single(&self,_:DmaMapHandle) {unreachable!()}
++        unsafe fn map_single(&self,_:u64,original:NonNull<u8>,size:NonZeroUsize,_:usize,_:DmaDirection)->core::result::Result<DmaMapHandle,DmaError> {
++            let layout=Layout::from_size_align(size.get(),65536).unwrap();let addr=NonNull::new(unsafe{std::alloc::alloc_zeroed(layout)}).unwrap();
++            Ok(unsafe{DmaMapHandle::new(addr,DmaAddr::from(addr.as_ptr()as u64),layout,Some(original))})
++        }
++        unsafe fn unmap_single(&self,handle:DmaMapHandle) {unsafe{std::alloc::dealloc(handle.as_ptr().as_ptr(),handle.layout())}}
 +    }
 +    impl KernelOp for Memory {fn delay(&self,_:Duration) {}}
-+    static MEMORY:Memory=Memory;
++    pub(crate) static MEMORY:Memory=Memory;
 +    #[test]
 +    fn event_cycle_is_checked_before_consumption_and_wraps() {
 +        let kernel=Kernel::new(u64::MAX,&MEMORY);

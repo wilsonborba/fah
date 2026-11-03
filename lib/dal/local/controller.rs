@@ -351,6 +351,12 @@ fn device_future<T>(
 }
 fn usb_error(error: crab_usb::usb_if::err::USBError) -> OperationError {
     use crab_usb::usb_if::err::USBError;
+    let completion_code = match &error {
+        USBError::TransferError(crab_usb::usb_if::err::TransferError::Other(detail)) => detail
+            .downcast_ref::<crab_usb::CommandFailure>()
+            .map(|failure| failure.code),
+        _ => None,
+    };
     let category = match error {
         USBError::InvalidParameter | USBError::NotInitialized => ErrorCategory::Validation,
         USBError::NotSupported => ErrorCategory::Unsupported,
@@ -362,7 +368,7 @@ fn usb_error(error: crab_usb::usb_if::err::USBError) -> OperationError {
         category,
         message: format!("{error:?}"),
         os_code: None,
-        completion_code: None,
+        completion_code,
     }
 }
 
@@ -503,122 +509,7 @@ fn recovery_error(message: String, code: Option<u32>) -> OperationError {
 }
 impl crate::domain::services::requests::RequestBackend for LocalController {
     fn submit_request(&mut self, request: OwnedRequest) -> Result<u64, OperationError> {
-        self.check_event_pump()?;
-        let token = self.next_request;
-        let next = token
-            .checked_add(1)
-            .ok_or_else(|| OperationError::validation("backend request identity exhausted"))?;
-        let OwnedRequest {
-            metadata,
-            mut buffer,
-        } = request;
-        let direction = match metadata.direction {
-            Direction::In => crab_usb::usb_if::transfer::Direction::In,
-            Direction::Out => crab_usb::usb_if::transfer::Direction::Out,
-        };
-        let transfer_buffer = if metadata.direction == Direction::In {
-            crab_usb::usb_if::endpoint::TransferBuffer::from_mut_slice(&mut buffer)
-        } else {
-            crab_usb::usb_if::endpoint::TransferBuffer::from_slice(&buffer)
-        };
-        use crab_usb::usb_if::{
-            endpoint::TransferRequest,
-            host::ControlSetup,
-            transfer::{Recipient, Request, RequestType},
-        };
-        let raw = match metadata.transfer_type {
-            TransferType::Control => {
-                let setup = metadata
-                    .setup
-                    .ok_or_else(|| OperationError::validation("SETUP missing"))?;
-                let request_type = match (setup.request_type >> 5) & 3 {
-                    0 => RequestType::Standard,
-                    1 => RequestType::Class,
-                    2 => RequestType::Vendor,
-                    _ => return Err(OperationError::validation("reserved request type")),
-                };
-                let recipient = match setup.request_type & 31 {
-                    0 => Recipient::Device,
-                    1 => Recipient::Interface,
-                    2 => Recipient::Endpoint,
-                    3 => Recipient::Other,
-                    _ => return Err(OperationError::validation("reserved recipient")),
-                };
-                TransferRequest::Control {
-                    setup: ControlSetup {
-                        request_type,
-                        recipient,
-                        request: Request::from(setup.request),
-                        value: setup.value,
-                        index: setup.index,
-                    },
-                    direction,
-                    buffer: transfer_buffer,
-                }
-            }
-            TransferType::Bulk => TransferRequest::Bulk {
-                direction,
-                buffer: transfer_buffer,
-            },
-            TransferType::Interrupt => TransferRequest::Interrupt {
-                direction,
-                buffer: transfer_buffer,
-            },
-        };
-        let adapter = self
-            .adapter
-            .ok_or_else(|| OperationError::validation("DMA adapter unavailable"))?;
-        let epoch = adapter.allocation_epoch();
-        let host = self
-            .host
-            .as_mut()
-            .ok_or_else(|| OperationError::validation("controller unavailable"))?;
-        let raw_id = match host.submit_request(metadata.device.slot, metadata.endpoint, raw) {
-            Ok(id) => id,
-            Err(error) => {
-                // For the validated control/bulk/interrupt profile all fallible submission
-                // checks precede TRB publication. Any dropped fresh map is unpublished.
-                for lease in adapter.retired_streaming_since(epoch) {
-                    unsafe { adapter.reclaim_lease_after_quiescence(lease) }
-                        .map_err(|message| recovery_error(message, None))?;
-                }
-                return Err(usb_error(error));
-            }
-        };
-        // Once published, metadata failures must return a retained accepted token.
-        let (lease, terminal_error) =
-            match host.request_dma_address(metadata.device.slot, metadata.endpoint, raw_id) {
-                Ok(Some(iova)) => match adapter.mapping_lease(iova) {
-                    Some(lease) => (Some(lease), None),
-                    None => (
-                        None,
-                        Some(recovery_error(
-                            "published request has no DMA lease".into(),
-                            None,
-                        )),
-                    ),
-                },
-                Ok(None) if metadata.requested_length == 0 => (None, None),
-                _ => (
-                    None,
-                    Some(recovery_error(
-                        "cannot identify published request mapping".into(),
-                        None,
-                    )),
-                ),
-            };
-        self.pending.insert(
-            token,
-            PendingRequest {
-                metadata,
-                buffer,
-                raw_id,
-                lease,
-                terminal_error,
-            },
-        );
-        self.next_request = next;
-        Ok(token)
+        self.submit_owned(request, None)
     }
     fn poll_request(&mut self, token: u64) -> Result<Option<BackendCompletion>, OperationError> {
         self.check_event_pump()?;
@@ -702,10 +593,28 @@ impl crate::domain::services::requests::RequestBackend for LocalController {
 }
 
 impl crate::domain::services::recovery::RecoveryBackend for LocalController {
+    fn reset_endpoint_recovery(
+        &mut self,
+        slot: u8,
+        endpoint: u8,
+        preserve: bool,
+    ) -> Result<crate::domain::models::requests::BackendAbort, OperationError> {
+        self.recover_endpoint(slot, endpoint, Some(preserve))
+    }
     fn abort_endpoint(
         &mut self,
         slot: u8,
         endpoint: u8,
+    ) -> Result<crate::domain::models::requests::BackendAbort, OperationError> {
+        self.recover_endpoint(slot, endpoint, None)
+    }
+}
+impl LocalController {
+    fn recover_endpoint(
+        &mut self,
+        slot: u8,
+        endpoint: u8,
+        reset: Option<bool>,
     ) -> Result<crate::domain::models::requests::BackendAbort, OperationError> {
         use crate::domain::services::requests::RequestBackend;
         self.check_event_pump()?;
@@ -719,7 +628,10 @@ impl crate::domain::services::recovery::RecoveryBackend for LocalController {
             .as_mut()
             .ok_or_else(|| OperationError::validation("controller unavailable"))?;
         // Neither publishing Stop Endpoint nor a software cancellation is proof.
-        device_future(host.stop_endpoint(slot, endpoint))?;
+        match reset {
+            Some(preserve) => device_future(host.reset_endpoint(slot, endpoint, preserve))?,
+            None => device_future(host.stop_endpoint(slot, endpoint))?,
+        };
         let tokens: Vec<_> = self
             .pending
             .iter()
@@ -949,5 +861,187 @@ fn halt_mapping(
             return Err("controller halt timed out; DMA ownership retained".into());
         }
         std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+impl LocalController {
+    fn submit_owned(
+        &mut self,
+        request: OwnedRequest,
+        fields: Option<crab_usb::ExplicitControlFields>,
+    ) -> Result<u64, OperationError> {
+        self.check_event_pump()?;
+        let token = self.next_request;
+        let next = token
+            .checked_add(1)
+            .ok_or_else(|| OperationError::validation("backend request identity exhausted"))?;
+        let OwnedRequest {
+            metadata,
+            mut buffer,
+        } = request;
+        let direction = match metadata.direction {
+            Direction::In => crab_usb::usb_if::transfer::Direction::In,
+            Direction::Out => crab_usb::usb_if::transfer::Direction::Out,
+        };
+        let transfer_buffer = if metadata.direction == Direction::In {
+            crab_usb::usb_if::endpoint::TransferBuffer::from_mut_slice(&mut buffer)
+        } else {
+            crab_usb::usb_if::endpoint::TransferBuffer::from_slice(&buffer)
+        };
+        use crab_usb::usb_if::{
+            endpoint::TransferRequest,
+            host::ControlSetup,
+            transfer::{Recipient, Request, RequestType},
+        };
+        let raw = match metadata.transfer_type {
+            TransferType::Control => {
+                let setup = if fields.is_some() {
+                    crate::domain::models::requests::SetupPacket {
+                        request_type: 0x40,
+                        request: 0,
+                        value: 0,
+                        index: 0,
+                        length: 0,
+                    }
+                } else {
+                    metadata
+                        .setup
+                        .ok_or_else(|| OperationError::validation("SETUP missing"))?
+                };
+                let request_type = match (setup.request_type >> 5) & 3 {
+                    0 => RequestType::Standard,
+                    1 => RequestType::Class,
+                    2 => RequestType::Vendor,
+                    _ => return Err(OperationError::validation("reserved request type")),
+                };
+                let recipient = match setup.request_type & 31 {
+                    0 => Recipient::Device,
+                    1 => Recipient::Interface,
+                    2 => Recipient::Endpoint,
+                    3 => Recipient::Other,
+                    _ => return Err(OperationError::validation("reserved recipient")),
+                };
+                TransferRequest::Control {
+                    setup: ControlSetup {
+                        request_type,
+                        recipient,
+                        request: Request::from(setup.request),
+                        value: setup.value,
+                        index: setup.index,
+                    },
+                    direction,
+                    buffer: transfer_buffer,
+                }
+            }
+            TransferType::Bulk => TransferRequest::Bulk {
+                direction,
+                buffer: transfer_buffer,
+            },
+            TransferType::Interrupt => TransferRequest::Interrupt {
+                direction,
+                buffer: transfer_buffer,
+            },
+        };
+        let adapter = self
+            .adapter
+            .ok_or_else(|| OperationError::validation("DMA adapter unavailable"))?;
+        let epoch = adapter.allocation_epoch();
+        let host = self
+            .host
+            .as_mut()
+            .ok_or_else(|| OperationError::validation("controller unavailable"))?;
+        let result = match fields {
+            Some(fields) => host.submit_control_plan(metadata.device.slot, raw, fields),
+            None => host.submit_request(metadata.device.slot, metadata.endpoint, raw),
+        };
+        let raw_id = match result {
+            Ok(id) => id,
+            Err(error) => {
+                // For the validated control/bulk/interrupt profile all fallible submission
+                // checks precede TRB publication. Any dropped fresh map is unpublished.
+                for lease in adapter.retired_streaming_since(epoch) {
+                    unsafe { adapter.reclaim_lease_after_quiescence(lease) }
+                        .map_err(|message| recovery_error(message, None))?;
+                }
+                return Err(usb_error(error));
+            }
+        };
+        // Once published, metadata failures must return a retained accepted token.
+        let (lease, terminal_error) =
+            match host.request_dma_address(metadata.device.slot, metadata.endpoint, raw_id) {
+                Ok(Some(iova)) => match adapter.mapping_lease(iova) {
+                    Some(lease) => (Some(lease), None),
+                    None => (
+                        None,
+                        Some(recovery_error(
+                            "published request has no DMA lease".into(),
+                            None,
+                        )),
+                    ),
+                },
+                Ok(None) if metadata.requested_length == 0 => (None, None),
+                _ => (
+                    None,
+                    Some(recovery_error(
+                        "cannot identify published request mapping".into(),
+                        None,
+                    )),
+                ),
+            };
+        self.pending.insert(
+            token,
+            PendingRequest {
+                metadata,
+                buffer,
+                raw_id,
+                lease,
+                terminal_error,
+            },
+        );
+        self.next_request = next;
+        Ok(token)
+    }
+}
+
+impl crate::domain::services::explicit::ExplicitBackend for LocalController {
+    fn submit_control_plan(
+        &mut self,
+        plan: crate::domain::models::control_plan::ValidatedControlPlan,
+    ) -> Result<u64, OperationError> {
+        fn direction(d: Direction) -> crab_usb::usb_if::transfer::Direction {
+            match d {
+                Direction::In => crab_usb::usb_if::transfer::Direction::In,
+                Direction::Out => crab_usb::usb_if::transfer::Direction::Out,
+            }
+        }
+        let fields = crab_usb::ExplicitControlFields {
+            setup: plan.wire_setup,
+            data_stage: plan.has_data,
+            data_direction: direction(plan.data_direction),
+            status_direction: direction(plan.status_direction),
+        };
+        self.submit_owned(
+            OwnedRequest {
+                metadata: plan.metadata,
+                buffer: plan.buffer,
+            },
+            Some(fields),
+        )
+    }
+    fn noop(&mut self) -> Result<[u32; 4], OperationError> {
+        self.check_event_pump()?;
+        let host = self
+            .host
+            .as_mut()
+            .ok_or_else(|| OperationError::validation("controller unavailable"))?;
+        let raw = device_future(async { Ok(host.noop().await) })?;
+        let code = raw[2] >> 24;
+        if code != 1 {
+            return Err(recovery_error(
+                format!("Noop command failed: {code}"),
+                Some(code),
+            ));
+        }
+        Ok(raw)
     }
 }

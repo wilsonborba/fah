@@ -19,23 +19,7 @@ pub(crate) struct RequestRecord {
 }
 impl<B: RequestBackend> UsbSession<B> {
     pub fn submit_request(&mut self, spec: RequestSpec) -> Result<RequestReport, OperationError> {
-        if self.records.len() >= 1024
-            || self
-                .records
-                .keys()
-                .filter(|id| {
-                    self.session
-                        .requests
-                        .state(**id)
-                        .is_ok_and(|state| state.device_may_access())
-                })
-                .count()
-                >= 128
-        {
-            return Err(OperationError::validation(
-                "request limit reached; reclaim terminal requests",
-            ));
-        }
+        self.check_request_capacity()?;
         let request = spec.prepare()?;
         let metadata = request.metadata.clone();
         let device = self.prepared_device(metadata.device)?;
@@ -88,6 +72,26 @@ impl<B: RequestBackend> UsbSession<B> {
             },
         );
         self.request_status(id)
+    }
+    pub(crate) fn check_request_capacity(&self) -> Result<(), OperationError> {
+        if self.records.len() >= 1024
+            || self
+                .records
+                .keys()
+                .filter(|id| {
+                    self.session
+                        .requests
+                        .state(**id)
+                        .is_ok_and(|state| state.device_may_access())
+                })
+                .count()
+                >= 128
+        {
+            return Err(OperationError::validation(
+                "request limit reached; reclaim terminal requests",
+            ));
+        }
+        Ok(())
     }
     pub fn request_status(&self, id: RequestId) -> Result<RequestReport, OperationError> {
         let record = self

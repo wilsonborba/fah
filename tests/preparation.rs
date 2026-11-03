@@ -610,3 +610,59 @@ fn rebase_failure_keeps_confirmed_abort_but_requires_controller_recovery() {
     usb.reclaim_request(id).unwrap();
     assert!(usb.submit_request(control(device, 2)).is_err());
 }
+
+impl fah::domain::services::explicit::ExplicitBackend for Fake {
+    fn submit_control_plan(
+        &mut self,
+        plan: fah::domain::models::control_plan::ValidatedControlPlan,
+    ) -> Result<u64, OperationError> {
+        self.effect(&format!(
+            "plan:wlength={}",
+            u16::from_le_bytes([plan.wire_setup[6], plan.wire_setup[7]])
+        ))?;
+        fah::domain::services::requests::RequestBackend::submit_request(
+            self,
+            fah::domain::models::requests::OwnedRequest {
+                metadata: plan.metadata,
+                buffer: plan.buffer,
+            },
+        )
+    }
+    fn noop(&mut self) -> Result<[u32; 4], OperationError> {
+        self.effect("noop")?;
+        Ok([0, 0, 1 << 24, 33 << 10])
+    }
+}
+#[test]
+fn explicit_plan_uses_same_request_ownership_and_rejects_stale_before_effect() {
+    use fah::domain::models::{control_plan::*, requests::*};
+    let (mut usb, state) = fixture();
+    let port = usb.inspect_ports().unwrap()[0].id;
+    let port = usb.reset_port(port, false).unwrap().id;
+    let device = usb.enable_slot(port).unwrap();
+    let device = usb.address_device(device.id, false).unwrap();
+    let plan = ControlPlan {
+        device: device.id,
+        profile: ControlProfile::DeviceCompatibility,
+        setup: SetupPacket {
+            request_type: 0x40,
+            request: 85,
+            value: 0,
+            index: 0,
+            length: 42,
+        },
+        data_stage: None,
+        status_direction: Some(Direction::In),
+        data: vec![],
+    };
+    let request = usb.submit_control_plan(plan.clone()).unwrap();
+    assert!(request.state.device_may_access());
+    assert!(usb.reclaim_request(request.id).is_err());
+    let before = state.lock().unwrap().trace.len();
+    let mut stale = plan;
+    stale.device.generation += 1;
+    assert!(usb.submit_control_plan(stale).is_err());
+    assert_eq!(state.lock().unwrap().trace.len(), before);
+    assert_eq!(usb.noop().unwrap()[2] >> 24, 1);
+    usb.close().unwrap();
+}
