@@ -69,6 +69,13 @@ The maintained changes are `patches/crabusb-hosted-backend.patch` and
 checks the complete patched tree and refuses unknown edits. `.fah-cache/` is generated
 source storage, not an upstream fork or an independent second controller owner.
 
+`python3 scripts/prepare-dependencies.py --check` only verifies, with no network
+access and no changes. It rebuilds the expected trees from the pinned revision, the
+pinned archive and the patches in a temporary directory, then compares every file.
+Only CrabUSB's Git metadata and the top-level `target/` and `Cargo.lock` written by
+`scripts/test-backend.py` are excluded. A difference stops the command and stays in
+place. Both modes give the same result from any working directory.
+
 CrabUSB changes expose explicit steps, hosted synchronization, reviewed DMA accesses,
 real endpoint stop/reset/rebase and resumable lifecycle support. The DMA patch uses
 volatile scalar access, disables mapped-reference helpers and supports the VFIO
@@ -140,10 +147,14 @@ record the exact userspace libraries and executable copied into the initramfs.
 VM preparation/execution is deliberately restricted to a **clean
 `release/v0.1.0`** checkout. Build outputs/caches are ignored and do not dirty it.
 After changing the release source, rebuild the executable and prepare a new image.
+Build the payload from a clean release profile with the pinned toolchain; do not set
+`RUSTUP_TOOLCHAIN`. Cargo reuses artifacts from any toolchain of the same version,
+and a different installation (for example one with `rust-src`) embeds other paths.
 
 ```sh
 git switch release/v0.1.0
 python3 scripts/prepare-dependencies.py
+cargo clean --release
 cargo build --locked --release --features hosted-direct
 python3 scripts/lab.py plan
 python3 scripts/lab.py prepare --kernel-root "$FAH_KERNEL_DIR/root"
@@ -406,6 +417,11 @@ python3 scripts/release.py candidate --evidence <feasibility-run> --evidence <fi
 Each evidence argument is an absolute path under the generated lab runs. Packaging
 requires the same source commit and executable hash as every selected run. It verifies
 the eleven trace windows/failure rows and refuses failed, stale or incomplete evidence.
+Both `audit` and `candidate` first run the `--check` comparison above, before Cargo
+metadata or license texts are read. The candidate refuses a `RUSTUP_TOOLCHAIN`
+override, removes the release profile, rebuilds from the verified trees, repeats the
+comparison and records it in `provenance.json`. The rebuilt executable must equal the
+VM-tested one. Unknown dependency edits stop packaging.
 Artifacts default to `~/.cache/fah-release/`; `SHA256SUMS`, sidecar archive checksum,
 `provenance.json`, `dependency-licenses.json` and `RELEASE-NOTES.md` are included.
 The binary is tested for the recorded Linux/userspace/toolchain; arbitrary-host byte

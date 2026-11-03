@@ -165,7 +165,7 @@ def prepare(lab,kernel_root=pathlib.Path('/')):
     (stage / 'run-id').write_text(run_id)
     binary=ROOT/'target/release/fah'
     if not binary.is_file():
-        raise ValueError('build payload first: RUSTUP_TOOLCHAIN=stable cargo build --locked --release --features hosted-direct')
+        raise ValueError('build the payload first with the pinned toolchain: cargo clean --release && cargo build --locked --release --features hosted-direct')
     executable(binary,'bin/fah')
     copy_file(ROOT / 'scripts/lab/guest.py', 'guest.py')
     (stage/'restore-modules.json').write_text(json.dumps(modules[initial_count:]))
