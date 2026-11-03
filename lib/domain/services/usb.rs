@@ -17,6 +17,7 @@ pub trait DeviceBackend: ControllerBackend {
     fn address_device(&mut self, slot: u8, port: u8, bsr: bool) -> Result<(), OperationError>;
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeviceId {
     pub session: u64,
     pub generation: u64,
@@ -160,6 +161,9 @@ impl<B: DeviceBackend> UsbSession<B> {
         };
         self.devices.insert(slot, device.clone());
         Ok(device)
+    }
+    pub fn device_snapshots(&self) -> Vec<DeviceSnapshot> {
+        self.devices.values().cloned().collect()
     }
     pub fn device(&self, id: DeviceId) -> Result<&DeviceSnapshot, OperationError> {
         let device = self

@@ -18,6 +18,7 @@ pub enum TransferType {
     Interrupt,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SetupPacket {
     pub request_type: u8,
     pub request: u8,
@@ -26,6 +27,7 @@ pub struct SetupPacket {
     pub length: u16,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RequestSpec {
     pub device: DeviceId,
     pub endpoint: u8,
