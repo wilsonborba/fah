@@ -32,6 +32,7 @@ pub struct DeviceSnapshot {
 }
 pub struct UsbSession<B: DeviceBackend> {
     pub session: Session<B>,
+    pub(crate) recoverable_stall: Option<super::recovery::RecoverableStall>,
     ports: Option<Ports>,
     reset_ports: BTreeMap<u8, PortId>,
     devices: BTreeMap<u8, DeviceSnapshot>,
@@ -45,6 +46,7 @@ impl<B: DeviceBackend> UsbSession<B> {
     pub fn new(backend: B, identity: u64) -> Self {
         Self {
             session: Session::new(backend, identity),
+            recoverable_stall: None,
             ports: None,
             reset_ports: BTreeMap::new(),
             devices: BTreeMap::new(),
@@ -202,6 +204,18 @@ impl<B: DeviceBackend> UsbSession<B> {
                 "another slot already owns address zero",
             ));
         }
+        if self.records.iter().any(|(request, record)| {
+            record.metadata.device == id
+                && self
+                    .session
+                    .requests
+                    .state(*request)
+                    .is_ok_and(|state| state.device_may_access())
+        }) {
+            return Err(OperationError::validation(
+                "address assignment requires all device requests to be terminal",
+            ));
+        }
         let result =
             self.session
                 .initialized_backend()?
@@ -224,6 +238,7 @@ impl<B: DeviceBackend> UsbSession<B> {
         self.interfaces.clear();
         self.endpoints.clear();
         self.records.clear();
+        self.recoverable_stall = None;
         Ok(())
     }
     pub(crate) fn effect<T>(

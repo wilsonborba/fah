@@ -28,9 +28,9 @@ FAH also targets broader USB protocol research and controller diagnostics. Succe
 
 ### Current status
 
-The Rust application foundation is implemented. Help, version, argument validation, and non-hardware CI are available. The USB driver is not implemented yet.
+The Rust driver, explicit USB operations, persistent CLI and conservative shutdown path are implemented and fake-tested. Guest topology and synthetic-fixture checks pass; integrated FAH transfer validation is in progress. Physical Intel and iPad case-study behavior remain unverified.
 
-Prepare pinned sources with `python3 scripts/prepare-dependencies.py`. Then build and check with `cargo check --locked`, `cargo test --locked`, and `cargo run -- --help`. Hardware operations are not available in this foundation.
+Prepare pinned sources with `python3 scripts/prepare-dependencies.py`. Run `cargo test --locked --features hosted-direct` and build with `cargo build --locked --release --features hosted-direct`. The executable currently accepts only the marked emulated guest; host controller binding is unavailable.
 
 ---
 
@@ -78,3 +78,28 @@ FAH separates low-level hardware interaction from user command parsing:
 ## 6. License
 
 Dual-licensed under either Apache License, Version 2.0 or MIT license at your option.
+
+
+## Emulated guest lab
+
+On clean `release/v0.1.0`, use `python3 scripts/lab.py plan`, then
+`python3 scripts/lab.py prepare` and `python3 scripts/lab.py run --suite fixture`.
+The launcher requires KVM, QEMU 10.0's `pc-q35-10.0`, and the exact Debian kernel/config
+recorded in `scripts/lab/kernel.json`. It copies the installed kernel and selected
+modules without changing the host boot configuration. Build the hosted release
+binary first; no package installation or host driver binding is performed.
+
+The guest has 2 GiB RAM, 2 vCPUs, a serial console, a virtual Intel IOMMU, an
+emulated xHCI, keyboard and USB storage. Each run creates an 8 MiB synthetic disk.
+The firmware marker, emulated PCI IDs and singleton guest IOMMU group are checked
+before any guest ownership change. No host block/USB/PCI device is forwarded.
+
+Artifacts persist in `~/.cache/fah-lab/runs/<run>`: serial output, commands,
+source/image fingerprints, VFIO metadata, QMP PCI inventory, emulator trace and
+results. Run `python3 scripts/lab.py stop --run <run>` to stop that generated QEMU;
+`python3 scripts/lab.py cleanup --run <run>` removes its stopped disposable run.
+Cleanup rejects unmarked directories and unrelated/reused process IDs.
+
+The `fixture` suite restores the guest Linux xHCI driver and verifies the synthetic
+sector through `/dev/sda` **inside the guest**. This validates the lab fixtures;
+it does not substitute for FAH's separate transfer suites or physical validation.

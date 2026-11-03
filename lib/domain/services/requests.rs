@@ -126,6 +126,12 @@ impl<B: RequestBackend> UsbSession<B> {
             let result = self.session.initialized_backend()?.poll_request(token);
             if let Some(completion) = self.effect(result)? {
                 if let Some(error) = completion.error {
+                    let scoped_stall = self.session.state()
+                        == crate::domain::models::ControllerState::Initialized
+                        && completion.completion_code == Some(6)
+                        && error.completion_code == Some(6)
+                        && error.category == ErrorCategory::RecoveryRequired
+                        && !completion.quiescent;
                     self.session.requests.fail(
                         id,
                         error,
@@ -134,6 +140,17 @@ impl<B: RequestBackend> UsbSession<B> {
                     )?;
                     if !completion.quiescent {
                         self.session.recovery_required();
+                        self.recoverable_stall = if scoped_stall {
+                            self.session.recovery_revision().map(|revision| {
+                                super::recovery::RecoverableStall {
+                                    revision,
+                                    device: self.records[&id].metadata.device,
+                                    endpoint: self.records[&id].metadata.endpoint,
+                                }
+                            })
+                        } else {
+                            None
+                        };
                     }
                 } else {
                     let length = self.records[&id].metadata.requested_length;

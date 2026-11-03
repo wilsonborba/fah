@@ -468,6 +468,15 @@ fn bounded_pending_capacity_rejects_without_publishing_or_losing_buffers() {
 
 use fah::domain::services::recovery::RecoveryBackend;
 impl RecoveryBackend for Fake {
+    fn reset_endpoint_recovery(
+        &mut self,
+        slot: u8,
+        endpoint: u8,
+        preserve: bool,
+    ) -> Result<BackendAbort, OperationError> {
+        self.effect(&format!("reset:preserve:{preserve}"))?;
+        self.abort_endpoint(slot, endpoint)
+    }
     fn abort_endpoint(&mut self, slot: u8, endpoint: u8) -> Result<BackendAbort, OperationError> {
         self.effect("stop:submitted")?;
         self.effect("stop:completed")?;
@@ -1069,4 +1078,91 @@ fn broken_output_and_eof_cannot_bypass_failed_close() {
         1
     );
     assert!(state.lock().unwrap().pending.is_empty());
+}
+
+#[test]
+fn assigning_address_after_bsr_rejects_pending_ep0_work() {
+    let (mut usb, state) = fixture();
+    let port = usb.inspect_ports().unwrap()[0].id;
+    let port = usb.reset_port(port, false).unwrap().id;
+    let device = usb.enable_slot(port).unwrap();
+    usb.address_device(device.id, true).unwrap();
+    let request = usb.submit_request(control(device.id, 8)).unwrap();
+    assert!(usb.address_device(device.id, false).is_err());
+    assert!(
+        !state
+            .lock()
+            .unwrap()
+            .trace
+            .iter()
+            .any(|op| op == "address:normal")
+    );
+    let token = state.lock().unwrap().next_token;
+    state
+        .lock()
+        .unwrap()
+        .completions
+        .insert(token, complete(8, 1, vec![0; 8]));
+    usb.poll_request(request.id).unwrap();
+    usb.reclaim_request(request.id).unwrap();
+    usb.address_device(device.id, false).unwrap();
+    usb.close().unwrap();
+}
+
+#[test]
+fn scoped_stall_reset_resumes_only_without_intervening_fault() {
+    for (intervening, rebase_failure) in [(false, false), (true, false), (false, true)] {
+        let (mut usb, state, device) = addressed();
+        let request = usb.submit_request(control(device, 1)).unwrap();
+        let token = state.lock().unwrap().next_token;
+        let error = OperationError {
+            category: ErrorCategory::RecoveryRequired,
+            message: "confirmed endpoint Stall".into(),
+            os_code: None,
+            completion_code: Some(6),
+        };
+        state.lock().unwrap().completions.insert(
+            token,
+            BackendCompletion {
+                actual_length: None,
+                completion_code: Some(6),
+                data: None,
+                error: Some(error),
+                quiescent: false,
+            },
+        );
+        usb.poll_request(request.id).unwrap();
+        assert_eq!(usb.session.state(), ControllerState::RecoveryRequired);
+        if intervening {
+            usb.session.recovery_required();
+        }
+        if rebase_failure {
+            state.lock().unwrap().fail = Some("rebase:completed");
+        }
+        let report = usb.reset_endpoint_request(request.id, true).unwrap();
+        assert_eq!(report.restart_ready, !rebase_failure);
+        assert_eq!(
+            usb.session.state(),
+            if intervening || rebase_failure {
+                ControllerState::RecoveryRequired
+            } else {
+                ControllerState::Initialized
+            }
+        );
+        if !intervening && !rebase_failure {
+            usb.submit_request(control(device, 2)).unwrap();
+        }
+        usb.close().unwrap();
+    }
+}
+#[test]
+fn unknown_fault_cannot_be_cleared_by_successful_endpoint_reset() {
+    let (mut usb, state, device) = addressed();
+    let request = usb.submit_request(control(device, 1)).unwrap();
+    usb.session.recovery_required();
+    let report = usb.reset_endpoint_request(request.id, false).unwrap();
+    assert!(report.restart_ready);
+    assert_eq!(usb.session.state(), ControllerState::RecoveryRequired);
+    assert!(state.lock().unwrap().pending.is_empty());
+    usb.close().unwrap();
 }
