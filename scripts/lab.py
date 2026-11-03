@@ -86,9 +86,21 @@ def cpio(root):
     return bytes(archive)
 
 
-def prepare(lab):
+def kernel_inputs(kernel_root,expected):
+    kernel=kernel_root/'boot'/('vmlinuz-'+KERNEL)
+    config=kernel_root/'boot'/('config-'+KERNEL)
+    assert digest(kernel)==expected['kernel_sha256'],'kernel checksum mismatch'
+    assert digest(config)==expected['config_sha256'],'kernel config checksum mismatch'
+    return kernel,config
+
+
+def prepare(lab,kernel_root=pathlib.Path('/')):
     release_only()
+    kernel_root=kernel_root.expanduser().resolve()
+    expected=json.loads((ROOT/'scripts/lab/kernel.json').read_text())
+    kernel,config=kernel_inputs(kernel_root,expected)
     info = inventory(lab)
+    info['kernel_input_root']=str(kernel_root)
     lab.mkdir(parents=True, exist_ok=True)
     stage = lab / 'rootfs'
     if stage.is_symlink():
@@ -131,7 +143,7 @@ def prepare(lab):
     module_paths = []
     initial_count = 0
     for module in ['vfio-pci', 'qemu_fw_cfg', 'xhci_pci', 'usb_storage', 'usbhid', 'sd_mod']:
-        for line in command('/sbin/modprobe', '--show-depends', '-S', KERNEL, module).splitlines():
+        for line in command('/sbin/modprobe','-d',str(kernel_root), '--show-depends', '-S', KERNEL, module).splitlines():
             if line.startswith('insmod '):
                 path = pathlib.Path(line.split()[1])
                 if path not in module_paths:
@@ -140,15 +152,12 @@ def prepare(lab):
             initial_count = len(module_paths)
     modules = []
     for index, path in enumerate(module_paths):
+        key=str(path).split(KERNEL+'/',1)[1]
+        assert digest(path)==expected['module_sha256'].get(key),'kernel module checksum mismatch: '+key
         target = stage / 'modules' / f'{index:02}.ko'
         target.write_bytes(lzma.decompress(path.read_bytes()) if path.suffix == '.xz' else path.read_bytes())
         sources[str(path)] = digest(path)
         modules.append('/modules/' + target.name)
-    kernel = pathlib.Path('/boot/vmlinuz-' + KERNEL)
-    config = pathlib.Path('/boot/config-' + KERNEL)
-    expected = json.loads((ROOT / 'scripts/lab/kernel.json').read_text())
-    assert digest(kernel) == expected['kernel_sha256'], 'kernel checksum mismatch'
-    assert digest(config) == expected['config_sha256'], 'kernel config checksum mismatch'
     shutil.copy2(kernel, lab / 'kernel')
     sources[str(kernel)] = digest(kernel)
     sources[str(config)] = digest(config)
@@ -377,6 +386,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['plan', 'prepare', 'run','stop','cleanup'])
     parser.add_argument('--lab', type=pathlib.Path, default=DEFAULT_LAB)
+    parser.add_argument('--kernel-root',type=pathlib.Path,default=pathlib.Path('/'),help='installed / or privately extracted/depmod-prepared Debian guest kernel root')
     parser.add_argument('--suite', choices=['feasibility','fixture','smoke','explicit','faults'], default='feasibility')
     parser.add_argument('--run',help='single generated run directory name for stop/cleanup')
     args = parser.parse_args()
@@ -384,7 +394,7 @@ def main():
     if args.action == 'plan':
         print(json.dumps(inventory(lab), indent=2))
     elif args.action == 'prepare':
-        prepare(lab)
+        prepare(lab,args.kernel_root)
     elif args.action=="run":
         return run(lab, args.suite)
     else:
