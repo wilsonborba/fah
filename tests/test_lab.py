@@ -53,9 +53,6 @@ class GuestMetadata(unittest.TestCase):
                 self.run_probe(index, error)
 
 
-if __name__ == '__main__':
-    unittest.main()
-
 host_spec = importlib.util.spec_from_file_location('fah_lab', ROOT / 'tests/lab/lab.py')
 lab = importlib.util.module_from_spec(host_spec)
 host_spec.loader.exec_module(lab)
@@ -195,3 +192,7 @@ class KernelInputRoot(unittest.TestCase):
             self.assertEqual(lab.kernel_inputs(root,expected),(kernel,config))
             config.write_bytes(b'changed')
             with self.assertRaisesRegex(AssertionError,'config checksum'):lab.kernel_inputs(root,expected)
+
+
+if __name__ == '__main__':
+    unittest.main()
