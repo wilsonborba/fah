@@ -117,10 +117,10 @@ impl<B: ExplicitBackend> Handler<B> {
     pub fn dispatch(&mut self, command: ShellCommand) -> Result<Value, OperationError> {
         match command {
             ShellCommand::Help => Ok(
-                json!({"input":"JSON Lines or help/version/capabilities/state/init/close/quit","commands":["help","version","capabilities","state","open","init","ports","port_ack","port_reset","slot_enable","address","descriptor","packet_size","configuration","interface","endpoints","submit","control_plan","status","poll","wait","reclaim","logical_cancel","abort","reset_endpoint","noop","close","quit"],"effects":{"observe":["state","ports","status","capabilities"],"hardware_steps":["init","port_reset","slot_enable","address","descriptor","configuration","interface","endpoints","submit","control_plan","abort","reset_endpoint"],"logical_only":["logical_cancel"],"polling":["poll","wait"],"release":["close","quit"]},"evidence":"compiled_and_fake_tested; runtime-specific evidence tracked in release report","no_implicit_initialization":true}),
+                json!({"input":"JSON Lines or help/version/capabilities/state/init/close/quit","commands":capabilities::command_names(),"effects":{"observe":["state","ports","status","capabilities"],"hardware_steps":["init","port_reset","slot_enable","address","descriptor","configuration","interface","endpoints","submit","control_plan","abort","reset_endpoint"],"logical_only":["logical_cancel"],"polling":["poll","wait"],"release":["close","quit"]},"evidence":"compiled_and_fake_tested; runtime-specific evidence tracked in release report","no_implicit_initialization":true}),
             ),
             ShellCommand::Version => Ok(json!({"version":env!("CARGO_PKG_VERSION")})),
-            ShellCommand::Capabilities => Ok(json!(capabilities::registry())),
+            ShellCommand::Capabilities => Ok(json!(capabilities::report())),
             ShellCommand::State => Ok(
                 json!({"state":self.usb.session.state(),"session_id":self.usb.session.identity(),"resources":self.usb.session.inspect()}),
             ),

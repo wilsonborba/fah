@@ -141,3 +141,17 @@ fn independent_cli_processes_never_start_in_the_same_fixed_session() {
     }
     assert_ne!(identities[0], identities[1]);
 }
+
+#[test]
+fn capability_report_is_available_without_hosted_backend_or_acquisition() {
+    let result = Command::new(env!("CARGO_BIN_EXE_fah"))
+        .arg("capabilities")
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    assert!(result.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["physical_validated"], false);
+    assert!(report["capabilities"].as_array().unwrap().len() > 30);
+}
