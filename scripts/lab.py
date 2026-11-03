@@ -324,7 +324,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['plan', 'prepare', 'run','stop','cleanup'])
     parser.add_argument('--lab', type=pathlib.Path, default=DEFAULT_LAB)
-    parser.add_argument('--suite', choices=['feasibility','fixture'], default='feasibility')
+    parser.add_argument('--suite', choices=['feasibility','fixture','smoke'], default='feasibility')
     parser.add_argument('--run',help='single generated run directory name for stop/cleanup')
     args = parser.parse_args()
     lab = safe_lab(args.lab)
