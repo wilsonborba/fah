@@ -202,6 +202,18 @@ impl<B: DeviceBackend> UsbSession<B> {
                 "another slot already owns address zero",
             ));
         }
+        if self.records.iter().any(|(request, record)| {
+            record.metadata.device == id
+                && self
+                    .session
+                    .requests
+                    .state(*request)
+                    .is_ok_and(|state| state.device_may_access())
+        }) {
+            return Err(OperationError::validation(
+                "address assignment requires all device requests to be terminal",
+            ));
+        }
         let result =
             self.session
                 .initialized_backend()?
