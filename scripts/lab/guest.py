@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 """Runs only inside the marked disposable guest; never on the host."""
+import errno
 import fcntl
 import json
 import os
@@ -61,7 +62,13 @@ def metadata():
             _, flags, regions, irqs = struct.unpack_from('<IIII', info)
             region_info = []
             for index in range(regions):
-                data = ioctl_buffer(device, 0x3b6c, 4096, 4096, 0, index, 0)
+                try:
+                    data = ioctl_buffer(device, 0x3b6c, 4096, 4096, 0, index, 0)
+                except OSError as error:
+                    if index == 8 and error.errno == errno.EINVAL:
+                        region_info.append(dict(index=index, available=False, errno=error.errno, reason='non-VGA PCI device'))
+                        continue
+                    raise
                 size, region_flags, _, cap_offset, length, offset = struct.unpack_from('<IIIIQQ', data)
                 region_info.append(dict(index=index, argsz=size, flags=region_flags, cap_offset=cap_offset, size=length, offset=offset, raw=data[:size].hex()))
             irq_info = []
