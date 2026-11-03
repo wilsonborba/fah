@@ -48,6 +48,9 @@
 - **xhci:** Encode TRB-aligned EP0 context pointer without overstrict setter (#56) ([e488158](https://github.com/wilsonborba/fah/commit/e488158e4cb7c65cce4dc94f0e395509d687c9f2))
 - **recovery:** Resume only proven scoped Stall recovery with unchanged fault revision (#57) ([a0bf956](https://github.com/wilsonborba/fah/commit/a0bf956ac54d1db8d965e0c05889463baaf90c34))
 - **session:** Namespace request identities across executable restarts (#58) ([65378e7](https://github.com/wilsonborba/fah/commit/65378e71be7c6ae871c322ef6f1c35442ec3711e))
+- **deps:** Verify prepared trees read-only and apply patches outside any checkout (#60, #61) ([331c9c2](https://github.com/wilsonborba/fah/commit/331c9c215f915db7d021d9f51a1d6010d9e27b20))
+- **release:** Verify sources first and rebuild the candidate cleanly with the pinned toolchain (#60, #61, #63) ([adf0066](https://github.com/wilsonborba/fah/commit/adf006678fd52626698f1c390788f35e2293d72a))
+- **lab:** Keep VM state in target/, run evidence in docs/evidence and packages in target/fah-release (#62) ([c1f2a02](https://github.com/wilsonborba/fah/commit/c1f2a02862f811c2c35e249b03fbb69d9d45258e))
 
 ### Refactoring
 - **usb:** Clarify legal address transitions ([f512c99](https://github.com/wilsonborba/fah/commit/f512c992601fca28c0af2e65452cb40d50d7f909))
@@ -56,6 +59,7 @@
 - Define DMA access ownership and execution gates ([d7560f5](https://github.com/wilsonborba/fah/commit/d7560f54e1dbd677ae424fe5f8b5a4daacd12ec1))
 - **vm:** Describe fixture commands, resource limits and evidence scope (#25) ([18c510a](https://github.com/wilsonborba/fah/commit/18c510a8254eb871c60f7a6305d6e9f8d766d5a7))
 - Publish reproducible guest setup and complete explicit CLI protocol (#30) ([b61eb95](https://github.com/wilsonborba/fah/commit/b61eb95666002b5706d45d21f27cc03d7767ad07))
+- **release:** Generate v0.1.0 changelog with git-cliff (#31) ([d2cb28a](https://github.com/wilsonborba/fah/commit/d2cb28aea5af949346d72b37fcf9f6bb80921bb5))
 
 ### Validation
 - **session:** Bound stalled backend futures without an executor ([b7cbf1a](https://github.com/wilsonborba/fah/commit/b7cbf1a032a876ca6795d681115217dfb95616df))
