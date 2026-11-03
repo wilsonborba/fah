@@ -83,10 +83,33 @@ def metadata():
     return group_number
 
 
+def restore():
+    guard()
+    assert PCI.joinpath('driver').resolve().name=='vfio-pci'
+    pathlib.Path('/sys/bus/pci/drivers/vfio-pci/unbind').write_text(BDF)
+    PCI.joinpath('driver_override').write_text('xhci_hcd')
+    for module in json.loads(pathlib.Path('/restore-modules.json').read_text()):
+        subprocess.run(['/bin/insmod',module],check=True)
+    if not PCI.joinpath('driver').exists():
+        pathlib.Path('/sys/bus/pci/drivers/xhci_hcd/bind').write_text(BDF)
+    assert PCI.joinpath('driver').resolve().name=='xhci_hcd'
+    import time
+    deadline=time.monotonic()+10
+    disk=pathlib.Path('/dev/sda')
+    while not disk.exists() and time.monotonic()<deadline:time.sleep(.05)
+    with disk.open('rb')as device:
+        data=device.read(512)
+    assert data==bytes(range(256))*2,'synthetic sector mismatch after guest restoration'
+    report('restored',driver='xhci_hcd',disk='/dev/sda',bytes=len(data),data_correct=True)
+
+
 def main():
     report('start', suite=sys.argv[1], run_id=pathlib.Path('/run-id').read_text())
     metadata()
-    assert sys.argv[1] == 'feasibility', 'unknown suite'
+    if sys.argv[1]=='fixture':
+        restore()
+    else:
+        assert sys.argv[1] == 'feasibility', 'unknown suite'
     report('result', success=True, suite=sys.argv[1], evidence='emulated_model_only')
 
 
