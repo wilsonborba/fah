@@ -1070,3 +1070,32 @@ fn broken_output_and_eof_cannot_bypass_failed_close() {
     );
     assert!(state.lock().unwrap().pending.is_empty());
 }
+
+#[test]
+fn assigning_address_after_bsr_rejects_pending_ep0_work() {
+    let (mut usb, state) = fixture();
+    let port = usb.inspect_ports().unwrap()[0].id;
+    let port = usb.reset_port(port, false).unwrap().id;
+    let device = usb.enable_slot(port).unwrap();
+    usb.address_device(device.id, true).unwrap();
+    let request = usb.submit_request(control(device.id, 8)).unwrap();
+    assert!(usb.address_device(device.id, false).is_err());
+    assert!(
+        !state
+            .lock()
+            .unwrap()
+            .trace
+            .iter()
+            .any(|op| op == "address:normal")
+    );
+    let token = state.lock().unwrap().next_token;
+    state
+        .lock()
+        .unwrap()
+        .completions
+        .insert(token, complete(8, 1, vec![0; 8]));
+    usb.poll_request(request.id).unwrap();
+    usb.reclaim_request(request.id).unwrap();
+    usb.address_device(device.id, false).unwrap();
+    usb.close().unwrap();
+}

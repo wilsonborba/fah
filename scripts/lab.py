@@ -356,8 +356,10 @@ def validate_trace(events,trace):
             check=event['command_bit'];commands=[trb for trb in trbs if trb[0]==check['type']]
             assert len(commands)==1 and bool(commands[0][1]&check['mask'])==check['set'],(event['name'],'command field mismatch',commands)
         if 'setup_wlength'in event:
-            setup=next(trb for trb in trbs if trb[0]=='TR_SETUP')
-            data=next(trb for trb in trbs if trb[0]=='TR_DATA')
+            setups=[trb for trb in trbs if trb[0]=='TR_SETUP']
+            datas=[trb for trb in trbs if trb[0]=='TR_DATA']
+            assert len(setups)==len(datas)==1,'duplicate/replayed control stages'
+            setup,data=setups[0],datas[0]
             assert setup[1]>>48==event['setup_wlength']and data[1]==event['data_trb_length'],'independent wire/data fields changed'
         if 'equivalent_to'in event:
             assert trbs==windows[event['equivalent_to']],(event['name'],'explicit/convenience trace differs',trbs,windows[event['equivalent_to']])
