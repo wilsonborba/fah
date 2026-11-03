@@ -197,7 +197,7 @@ def run(lab, suite):
     qmp_path=run_dir/'qmp.sock'
     trace_path=run_dir/'xhci.trace'
     trace_events=run_dir/'trace-events'
-    trace_events.write_text('\n'.join(['usb_xhci_fetch_trb','usb_xhci_slot_enable','usb_xhci_slot_address','usb_xhci_slot_configure','usb_xhci_port_reset','usb_xhci_ep_stop','usb_xhci_ep_reset','usb_xhci_ep_set_dequeue','usb_xhci_xfer_success','usb_xhci_xfer_error','usb_xhci_queue_event'])+'\n')
+    trace_events.write_text('\n'.join(['usb_xhci_runtime_write','usb_xhci_oper_write','usb_xhci_irq_msix','usb_xhci_fetch_trb','usb_xhci_slot_enable','usb_xhci_slot_address','usb_xhci_slot_configure','usb_xhci_port_reset','usb_xhci_ep_stop','usb_xhci_ep_reset','usb_xhci_ep_set_dequeue','usb_xhci_xfer_success','usb_xhci_xfer_error','usb_xhci_queue_event'])+'\n')
     args = ['qemu-system-x86_64' , '-machine', MACHINE + ',accel=kvm,kernel-irqchip=split', '-cpu', 'host', '-m', '2048', '-smp', '2', '-nodefaults', '-display', 'none', '-no-reboot', '-serial', 'stdio', '-monitor', 'none', '-kernel', str(lab / 'kernel'), '-initrd', str(lab / 'initramfs.gz'), '-append', 'console=ttyS0 rdinit=/init intel_iommu=on iommu.strict=1 panic=-1 fah_suite=' + suite, '-fw_cfg', 'name=opt/fah-lab,string=' + manifest['run_id'], '-device', 'intel-iommu,intremap=on,caching-mode=on,device-iotlb=on', '-device', 'qemu-xhci,id=xhci,addr=02.0,p2=4,p3=4', '-device','usb-kbd,id=keyboard,bus=xhci.0,port=1','-drive',f'if=none,id=usbdata,format=raw,file={disk}','-device','usb-storage,id=storage,bus=xhci.0,port=2,drive=usbdata','-qmp',f'unix:{qmp_path},server=on,wait=off','-trace',f'events={trace_events},file={trace_path}']
     (run_dir / 'command.json').write_text(json.dumps(args, indent=2))
     result = False
@@ -324,7 +324,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['plan', 'prepare', 'run','stop','cleanup'])
     parser.add_argument('--lab', type=pathlib.Path, default=DEFAULT_LAB)
-    parser.add_argument('--suite', choices=['feasibility','fixture'], default='feasibility')
+    parser.add_argument('--suite', choices=['feasibility','fixture','smoke'], default='feasibility')
     parser.add_argument('--run',help='single generated run directory name for stop/cleanup')
     args = parser.parse_args()
     lab = safe_lab(args.lab)
