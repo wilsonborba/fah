@@ -23,42 +23,82 @@ impl<B: ExplicitBackend> UsbSession<B> {
         &mut self,
         request: crate::domain::models::raw::RawOperation,
     ) -> Result<serde_json::Value, OperationError> {
+        use crate::domain::models::raw::{Effect, RawOperation as Op, effect};
         let identity = self.session.identity();
-        use crate::domain::models::raw::RawOperation as Op;
-        if matches!(
-            &request,
-            Op::RegisterWrite { .. }
-                | Op::DevicePacketSize { .. }
-                | Op::DeviceInterface { .. }
-                | Op::SlotEnable
-                | Op::StreamConfigure { .. }
-                | Op::AddressRoute { .. }
-                | Op::HubConfigure { .. }
-                | Op::DeviceConfiguration { .. }
-                | Op::EndpointConfigure { .. }
-                | Op::Place { .. }
-                | Op::Publish { .. }
-                | Op::Doorbell { .. }
-                | Op::Command { .. }
-                | Op::Transfer { .. }
-                | Op::ScatterTransfer { .. }
-        ) {
-            // A partial backend failure must not restore a stale managed view.
+        if self.session.state() == crate::domain::models::ControllerState::RecoveryRequired
+            && !self.raw_coherence.global_unknown
+        {
+            self.raw_coherence.mutate(Effect::Global, None, true)?;
+        }
+        if let Op::Reconcile { slot } = request {
+            let mut restored = false;
+            let mut current = None;
+            if let Some(slot) = slot {
+                let snapshot = self
+                    .session
+                    .recovery_backend()?
+                    .raw_operation(identity, Op::SlotContext { slot })?;
+                let pending = self.records.iter().any(|(id, r)| {
+                    r.metadata.device.slot == slot
+                        && self
+                            .session
+                            .requests
+                            .state(*id)
+                            .is_ok_and(|s| s.device_may_access())
+                });
+                restored = self.raw_coherence.reconcile(slot, &snapshot, pending);
+                current = Some(snapshot);
+            }
+            return Ok(
+                serde_json::json!({"scope":slot,"restored":restored,"managed_state":if self.raw_coherence.global_unknown{"unknown"}else if self.raw_coherence.slots.is_empty(){"coherent"}else{"slot_reconcile_required"},"coherence":self.raw_coherence,"current":current,"proof":"only known controller-only effects may match the original owned context; device mutations require explicit reconstruction; unknown global effects require coordinated close"}),
+            );
+        }
+        let effect = effect(&request);
+        let (baseline, pending) = if let Effect::Slot { slot, .. } = effect {
+            let baseline = self
+                .session
+                .recovery_backend()?
+                .raw_operation(identity, Op::SlotContext { slot })
+                .ok();
+            let pending = self.records.iter().any(|(id, r)| {
+                r.metadata.device.slot == slot
+                    && self
+                        .session
+                        .requests
+                        .state(*id)
+                        .is_ok_and(|s| s.device_may_access())
+            });
+            (baseline, pending)
+        } else {
+            (None, false)
+        };
+        self.raw_coherence.mutate(effect, baseline, pending)?;
+        if self.raw_coherence.global_unknown {
             self.session.recovery_required();
         }
-        let result = self
+        let mut result = self
             .session
             .recovery_backend()?
-            .raw_operation(identity, request);
-        if let Ok(value) = &result
-            && value
-                .get("managed_state")
-                .and_then(serde_json::Value::as_str)
-                == Some("unknown")
-        {
-            self.session.recovery_required();
+            .raw_operation(identity, request)?;
+        if let Some(value) = result.as_object_mut() {
+            value.insert(
+                "coherence_generation".into(),
+                self.raw_coherence.generation.into(),
+            );
+            if value.contains_key("managed_state") {
+                value.insert(
+                    "managed_state".into(),
+                    serde_json::json!(if self.raw_coherence.global_unknown {
+                        "unknown"
+                    } else if self.raw_coherence.slots.is_empty() {
+                        "coherent"
+                    } else {
+                        "slot_reconcile_required"
+                    }),
+                );
+            }
         }
-        result
+        Ok(result)
     }
     pub fn submit_control_plan(
         &mut self,

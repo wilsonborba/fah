@@ -500,10 +500,15 @@ creates primary arrays and retains a separate ring for each Stream ID. Select
 `{"kind":"stream","slot":1,"endpoint":129,"stream":1}` as the ring for placement,
 then ring the matching Stream ID explicitly. Controller/device support is required.
 
-Literal mutations invalidate the managed view before execution, including partial
-failure. Raw operations and coordinated close remain available. `reconcile`
-reports unknown state and required reconstruction; matching register values do
-not silently restore the old managed device view. Close/reopen rebuilds it.
+Known slot mutations bump a scoped generation and hold that slot's managed view;
+other slots remain usable. `reconcile` compares a known controller-only effect with
+the original owned Slot and Endpoint Context snapshot, with no pending DMA or
+device-state uncertainty. Device mutations require explicit reconstruction; matching
+controller contexts cannot clear them. Unrecognized commands, vendor SETUPs and
+direct ring/MMIO/doorbell mutations invalidate the global managed view. Readback
+never clears unknown global effects. Raw access stays available; coordinated
+close/reopen reconstructs a clean owner. Event correlation and buffer quiescence
+remain independent of managed-view reconciliation.
 
 Resource limits are explicit: 128 literal reservations per ring until close,
 4096 staged TRBs, 65536 retained raw events, 256MiB per raw allocation, 4096 primary

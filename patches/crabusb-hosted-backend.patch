@@ -96,10 +96,10 @@ index 71b939e..4ab690c 100644
 -    }
 -}
 diff --git a/usb-host/src/backend/kmod/mod.rs b/usb-host/src/backend/kmod/mod.rs
-index e17466d..e5c957d 100644
+index e17466d..72c09fc 100644
 --- a/usb-host/src/backend/kmod/mod.rs
 +++ b/usb-host/src/backend/kmod/mod.rs
-@@ -50,3 +50,197 @@ pub struct DeviceAddressInfo {
+@@ -50,3 +50,198 @@ pub struct DeviceAddressInfo {
      pub port_id: u8,
      pub infos: BTreeMap<Id<Hub>, HubInfo>,
  }
@@ -125,6 +125,7 @@ index e17466d..e5c957d 100644
 +        let result=device.address_route(&mut self.core,&info,route,parent_slot,parent_port,multi_tt,think,bsr).await;
 +        self.devices.insert(slot,device);result
 +    }
++    pub fn endpoint_context_words(&self,slot:u8)->Result<alloc::vec::Vec<alloc::vec::Vec<u32>>> {Ok(self.devices.get(&slot).ok_or(USBError::NotFound)?.endpoint_context_words())}
 +    pub fn input_slot_context_words(&self,slot:u8)->Result<alloc::vec::Vec<u32>> {Ok(self.devices.get(&slot).ok_or(USBError::NotFound)?.input_slot_context_words())}
 +    pub fn slot_context_words(&self,slot:u8)->Result<alloc::vec::Vec<u32>> {Ok(self.devices.get(&slot).ok_or(USBError::NotFound)?.slot_context_words())}
 +    pub async fn configure_hub(&mut self,slot:u8,root:u8,ports:u8,multi:bool,think:u16)->Result<()> {
@@ -376,7 +377,7 @@ index 27f0aca..8756cf2 100644
 +#[cfg(test)]
 +mod command_codes {use super::*;#[test]fn only_success_is_command_success(){assert!(validate_command_code(1).is_ok());for code in [0,6,13,19,255] {let Err(TransferError::Other(error))=validate_command_code(code) else{panic!("accepted command failure")};assert_eq!(error.downcast_ref::<CommandFailure>().unwrap().code,code);}}}
 diff --git a/usb-host/src/backend/kmod/xhci/context.rs b/usb-host/src/backend/kmod/xhci/context.rs
-index 900eaad..bffbe38 100644
+index 900eaad..c89328c 100644
 --- a/usb-host/src/backend/kmod/xhci/context.rs
 +++ b/usb-host/src/backend/kmod/xhci/context.rs
 @@ -1,7 +1,7 @@
@@ -388,10 +389,13 @@ index 900eaad..bffbe38 100644
  
  use super::SlotId;
  use crate::{err::*, osal::Kernel};
-@@ -83,6 +83,18 @@ impl ContextData {
+@@ -83,6 +83,21 @@ impl ContextData {
          }
      }
  
++    pub(crate) fn endpoint_words(&self)->Vec<Vec<u32>>{
++        match self {Self::Context32(c)=>{let v=c.out.read();(1..32).map(|i|v.endpoint(i).as_ref().to_vec()).collect()},Self::Context64(c)=>{let v=c.out.read();(1..32).map(|i|v.endpoint(i).as_ref().to_vec()).collect()}}
++    }
 +    pub(crate) fn input_slot_words(&self)->Vec<u32>{
 +        match self {Self::Context32(c)=>c.input.read().device().slot().as_ref().to_vec(),Self::Context64(c)=>c.input.read().device().slot().as_ref().to_vec()}
 +    }
@@ -408,7 +412,7 @@ index 900eaad..bffbe38 100644
          match self {
              ContextData::Context32(ctx) => ctx.out.dma_addr(),
 diff --git a/usb-host/src/backend/kmod/xhci/device.rs b/usb-host/src/backend/kmod/xhci/device.rs
-index a7996fc..c5c7a3a 100644
+index a7996fc..0032002 100644
 --- a/usb-host/src/backend/kmod/xhci/device.rs
 +++ b/usb-host/src/backend/kmod/xhci/device.rs
 @@ -39,6 +39,10 @@ use crate::{
@@ -422,10 +426,11 @@ index a7996fc..c5c7a3a 100644
      id: SlotId,
      ctx: ContextData,
      desc: DeviceDescriptor,
-@@ -55,6 +59,61 @@ pub struct Device {
+@@ -55,6 +59,62 @@ pub struct Device {
  }
  
  impl Device {
++    pub(crate) fn endpoint_context_words(&self)->Vec<Vec<u32>>{self.ctx.endpoint_words()}
 +    pub(crate) fn input_slot_context_words(&self)->Vec<u32>{self.ctx.input_slot_words()}
 +    pub(crate) fn slot_context_words(&self)->Vec<u32>{self.ctx.slot_words()}
 +
@@ -484,7 +489,7 @@ index a7996fc..c5c7a3a 100644
      pub(crate) async fn new(host: &mut Xhci) -> Result<Self> {
          let slot_id = host.device_slot_assignment().await?;
          debug!("Slot {slot_id} assigned");
-@@ -71,6 +130,8 @@ impl Device {
+@@ -71,6 +131,8 @@ impl Device {
          let desc = unsafe { core::mem::zeroed() };
  
          Ok(Self {
@@ -493,7 +498,7 @@ index a7996fc..c5c7a3a 100644
              id: slot_id,
              ctx,
              bell,
-@@ -159,30 +220,108 @@ impl Device {
+@@ -159,30 +221,108 @@ impl Device {
          Ok(())
      }
  
@@ -618,7 +623,7 @@ index a7996fc..c5c7a3a 100644
          // 直接使用 DeviceSpeed 枚举计算默认 max packet size
          let max_packet_size = parse_default_max_packet_size_from_port_speed(info.port_speed);
  
-@@ -204,9 +343,10 @@ impl Device {
+@@ -204,9 +344,10 @@ impl Device {
              parent_id = parent_hub.parent;
          }
  
@@ -631,7 +636,7 @@ index a7996fc..c5c7a3a 100644
          // ctrl dci
          let dci = Dci::CTRL;
          // 1. Allocate an Input Context data structure (6.2.5) and initialize all fields to
-@@ -287,16 +427,11 @@ impl Device {
+@@ -287,16 +428,11 @@ impl Device {
              endpoint_0.set_max_packet_size(max_packet_size);
              // • Max Burst Size = 0.
              endpoint_0.set_max_burst_size(0);
@@ -653,7 +658,7 @@ index a7996fc..c5c7a3a 100644
              // • Interval = 0.
              endpoint_0.set_interval(0);
              // • Max Primary Streams (MaxPStreams) = 0.
-@@ -326,14 +461,13 @@ impl Device {
+@@ -326,14 +462,13 @@ impl Device {
  
          mb();
  
@@ -672,7 +677,7 @@ index a7996fc..c5c7a3a 100644
              .await?;
  
          debug!("Address slot ok {result:x?}");
-@@ -348,12 +482,10 @@ impl Device {
+@@ -348,12 +483,10 @@ impl Device {
      async fn get_device_descriptor_base(&mut self) -> Result<DeviceDescriptorBase> {
          let mut data = vec![0u8; 8];
  
@@ -689,7 +694,7 @@ index a7996fc..c5c7a3a 100644
  
          Ok(desc)
      }
-@@ -465,7 +597,8 @@ impl Device {
+@@ -465,7 +598,8 @@ impl Device {
              self.ep_interfaces.insert(desc.address, interface);
  
              let xhci_interval =
@@ -699,7 +704,7 @@ index a7996fc..c5c7a3a 100644
  
              self.ctx.with_input(|input| {
                  let control_context = input.control_mut();
-@@ -528,7 +661,7 @@ impl Device {
+@@ -528,7 +662,7 @@ impl Device {
              input
                  .device_mut()
                  .slot_mut()
@@ -708,7 +713,7 @@ index a7996fc..c5c7a3a 100644
          });
          mb();
  
-@@ -591,78 +724,8 @@ impl Device {
+@@ -591,78 +725,8 @@ impl Device {
  
      /// 根据 XHCI 规范计算端点的 interval 值
      /// 参考 xHCI 规范第 6.2.3.6 节
@@ -789,7 +794,7 @@ index a7996fc..c5c7a3a 100644
      }
  
      async fn update_hub_inner(&mut self, params: HubParams) -> Result<()> {
-@@ -714,7 +777,11 @@ impl Device {
+@@ -714,7 +778,11 @@ impl Device {
              }
          });
  
@@ -802,7 +807,7 @@ index a7996fc..c5c7a3a 100644
          Ok(())
      }
  }
-@@ -765,3 +832,113 @@ impl DeviceOp for Device {
+@@ -765,3 +833,113 @@ impl DeviceOp for Device {
          self.update_hub_inner(params).boxed()
      }
  }

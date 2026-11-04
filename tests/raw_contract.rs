@@ -93,3 +93,95 @@ fn scatter_td_counts_packets_across_noncontiguous_segments() {
     assert!(trbs[..3].iter().all(|t| t[3] & 16 != 0 && t[3] & 32 == 0));
     assert_ne!(trbs[3][3] & 32, 0);
 }
+
+#[test]
+fn reconcile_requires_scoped_generation_and_independent_proof() {
+    let baseline = serde_json::json!({"words":[1,2],"endpoints":[[3,4]]});
+    let mut state = Coherence::default();
+    state
+        .mutate(
+            Effect::Slot {
+                slot: 1,
+                device: false,
+            },
+            Some(baseline.clone()),
+            false,
+        )
+        .unwrap();
+    assert!(!state.slots.contains_key(&2));
+    assert!(!state.reconcile(1, &serde_json::json!({"words":[5]}), false));
+    assert!(state.reconcile(1, &baseline, false));
+    state
+        .mutate(
+            Effect::Slot {
+                slot: 1,
+                device: true,
+            },
+            Some(baseline.clone()),
+            false,
+        )
+        .unwrap();
+    assert!(!state.reconcile(1, &baseline, false)); // controller match does not prove device state
+    state
+        .mutate(
+            Effect::Slot {
+                slot: 2,
+                device: false,
+            },
+            Some(baseline.clone()),
+            true,
+        )
+        .unwrap();
+    assert!(!state.reconcile(2, &baseline, false)); // pending-at-mutation needs terminal proof
+    state
+        .mutate(
+            Effect::Slot {
+                slot: 3,
+                device: false,
+            },
+            Some(baseline.clone()),
+            false,
+        )
+        .unwrap();
+    state.mutate(Effect::Global, None, false).unwrap();
+    assert!(!state.reconcile(3, &baseline, false)); // global uncertainty stays sticky
+    assert_eq!(state.generation, 5);
+}
+#[test]
+fn literal_effect_classification_does_not_narrow_unknown_or_vendor_words() {
+    let command = |words| RawOperation::Command {
+        words,
+        timeout_ms: 1,
+    };
+    assert_eq!(effect(&command([0, 0, 0, 23 << 10])), Effect::Observe);
+    assert_eq!(
+        effect(&command([0, 0, 0, (13 << 10) | (2 << 24)])),
+        Effect::Slot {
+            slot: 2,
+            device: false
+        }
+    );
+    assert_eq!(
+        effect(&command([0, 0, 0, (60 << 10) | (2 << 24)])),
+        Effect::Global
+    );
+    assert_eq!(
+        effect(&command([0, 0, 0, (13 << 10) | (2 << 24) | (1 << 8)])),
+        Effect::Global
+    );
+    let mut setup = [9 << 8, 0, 8, (2 << 10) | (1 << 6)];
+    let transfer = |t| RawOperation::Transfer {
+        slot: 2,
+        endpoint: 0,
+        trbs: vec![t],
+    };
+    assert_eq!(
+        effect(&transfer(setup)),
+        Effect::Slot {
+            slot: 2,
+            device: true
+        }
+    );
+    setup[0] |= 0x40;
+    assert_eq!(effect(&transfer(setup)), Effect::Global);
+}
