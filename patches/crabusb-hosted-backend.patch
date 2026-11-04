@@ -96,10 +96,10 @@ index 71b939e..4ab690c 100644
 -    }
 -}
 diff --git a/usb-host/src/backend/kmod/mod.rs b/usb-host/src/backend/kmod/mod.rs
-index e17466d..e138d7d 100644
+index e17466d..72c09fc 100644
 --- a/usb-host/src/backend/kmod/mod.rs
 +++ b/usb-host/src/backend/kmod/mod.rs
-@@ -50,3 +50,176 @@ pub struct DeviceAddressInfo {
+@@ -50,3 +50,198 @@ pub struct DeviceAddressInfo {
      pub port_id: u8,
      pub infos: BTreeMap<Id<Hub>, HubInfo>,
  }
@@ -125,15 +125,19 @@ index e17466d..e138d7d 100644
 +        let result=device.address_route(&mut self.core,&info,route,parent_slot,parent_port,multi_tt,think,bsr).await;
 +        self.devices.insert(slot,device);result
 +    }
++    pub fn endpoint_context_words(&self,slot:u8)->Result<alloc::vec::Vec<alloc::vec::Vec<u32>>> {Ok(self.devices.get(&slot).ok_or(USBError::NotFound)?.endpoint_context_words())}
++    pub fn input_slot_context_words(&self,slot:u8)->Result<alloc::vec::Vec<u32>> {Ok(self.devices.get(&slot).ok_or(USBError::NotFound)?.input_slot_context_words())}
++    pub fn slot_context_words(&self,slot:u8)->Result<alloc::vec::Vec<u32>> {Ok(self.devices.get(&slot).ok_or(USBError::NotFound)?.slot_context_words())}
 +    pub async fn configure_hub(&mut self,slot:u8,root:u8,ports:u8,multi:bool,think:u16)->Result<()> {
 +        self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.configure_hub(root,ports,multi,think).await
 +    }
 +
 +    pub fn iso_schedule(&mut self,slot:u8,address:u8,asap:bool,frame:u16)->Result<()> {self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.iso_schedule(address,asap,frame)}
++    pub fn raw_event_tail(&self)->u64 {self.core.raw_events.lock().back().map_or(0,|(seq,_)|*seq)}
++    pub fn raw_retained_events(&self)->alloc::vec::Vec<(u64,[u32;4])> {self.core.raw_events.lock().iter().copied().collect()}
 +    pub fn raw_events(&self,since:u64,limit:usize)->Result<alloc::vec::Vec<(u64,[u32;4])>> {
 +        let log=self.core.raw_events.lock();
-+        if log.front().is_some_and(|(seq,_)|since.saturating_add(1)<*seq) {return Err(USBError::Other(anyhow!("event cursor expired")));}
-+        Ok(log.iter().filter(|(seq,_)|*seq>since).take(limit.min(4096)).copied().collect())
++        event_window(&log,since,limit)
 +    }
 +    pub fn raw_place(&mut self,slot:u8,endpoint:u8,words:[u32;4])->Result<(usize,bool,u64)> {
 +        if slot==0 {Ok(self.core.cmd.raw_place(words))} else {self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.raw_place(endpoint,words)}
@@ -276,6 +280,24 @@ index e17466d..e138d7d 100644
 +}
 +
 +pub use xhci::cmd::CommandFailure;
++
++fn event_window(log:&alloc::collections::VecDeque<(u64,[u32;4])>,since:u64,limit:usize)->Result<alloc::vec::Vec<(u64,[u32;4])>> {
++    if log.front().is_some_and(|(seq,_)|since.saturating_add(1)<*seq){return Err(USBError::Other(anyhow!("event cursor expired")));}
++    Ok(log.iter().filter(|(seq,_)|*seq>since).take(limit.min(4096)).copied().collect())
++}
++#[cfg(test)]
++mod raw_cursor_tests {
++    use super::*;
++    #[test]
++    fn cursor_advances_beyond_first_page_and_detects_rollover(){
++        let mut log=alloc::collections::VecDeque::new();
++        for seq in 1..=5000 {log.push_back((seq,[seq as u32,0,0,0]));}
++        let first=event_window(&log,0,4096).unwrap();assert_eq!(first.len(),4096);
++        let second=event_window(&log,first.last().unwrap().0,4096).unwrap();assert_eq!(second.last().unwrap().0,5000);
++        log.pop_front();assert!(event_window(&log,0,4096).is_err());
++        assert_eq!(event_window(&log,4999,4096).unwrap()[0].0,5000);
++    }
++}
 diff --git a/usb-host/src/backend/kmod/transfer.rs b/usb-host/src/backend/kmod/transfer.rs
 index 7efe34d..9354d97 100644
 --- a/usb-host/src/backend/kmod/transfer.rs
@@ -355,7 +377,7 @@ index 27f0aca..8756cf2 100644
 +#[cfg(test)]
 +mod command_codes {use super::*;#[test]fn only_success_is_command_success(){assert!(validate_command_code(1).is_ok());for code in [0,6,13,19,255] {let Err(TransferError::Other(error))=validate_command_code(code) else{panic!("accepted command failure")};assert_eq!(error.downcast_ref::<CommandFailure>().unwrap().code,code);}}}
 diff --git a/usb-host/src/backend/kmod/xhci/context.rs b/usb-host/src/backend/kmod/xhci/context.rs
-index 900eaad..ab5ca53 100644
+index 900eaad..c89328c 100644
 --- a/usb-host/src/backend/kmod/xhci/context.rs
 +++ b/usb-host/src/backend/kmod/xhci/context.rs
 @@ -1,7 +1,7 @@
@@ -367,10 +389,19 @@ index 900eaad..ab5ca53 100644
  
  use super::SlotId;
  use crate::{err::*, osal::Kernel};
-@@ -83,6 +83,12 @@ impl ContextData {
+@@ -83,6 +83,21 @@ impl ContextData {
          }
      }
  
++    pub(crate) fn endpoint_words(&self)->Vec<Vec<u32>>{
++        match self {Self::Context32(c)=>{let v=c.out.read();(1..32).map(|i|v.endpoint(i).as_ref().to_vec()).collect()},Self::Context64(c)=>{let v=c.out.read();(1..32).map(|i|v.endpoint(i).as_ref().to_vec()).collect()}}
++    }
++    pub(crate) fn input_slot_words(&self)->Vec<u32>{
++        match self {Self::Context32(c)=>c.input.read().device().slot().as_ref().to_vec(),Self::Context64(c)=>c.input.read().device().slot().as_ref().to_vec()}
++    }
++    pub(crate) fn slot_words(&self)->Vec<u32>{
++        match self {Self::Context32(c)=>c.out.read().slot().as_ref().to_vec(),Self::Context64(c)=>c.out.read().slot().as_ref().to_vec()}
++    }
 +    pub(crate) fn endpoint_state_raw(&self,dci:usize)->u8 {
 +        match self {
 +            ContextData::Context32(ctx)=>(ctx.out.read().endpoint(dci).as_ref()[0]&7)as u8,
@@ -381,7 +412,7 @@ index 900eaad..ab5ca53 100644
          match self {
              ContextData::Context32(ctx) => ctx.out.dma_addr(),
 diff --git a/usb-host/src/backend/kmod/xhci/device.rs b/usb-host/src/backend/kmod/xhci/device.rs
-index a7996fc..eb5ff20 100644
+index a7996fc..0032002 100644
 --- a/usb-host/src/backend/kmod/xhci/device.rs
 +++ b/usb-host/src/backend/kmod/xhci/device.rs
 @@ -39,6 +39,10 @@ use crate::{
@@ -395,10 +426,14 @@ index a7996fc..eb5ff20 100644
      id: SlotId,
      ctx: ContextData,
      desc: DeviceDescriptor,
-@@ -55,6 +59,58 @@ pub struct Device {
+@@ -55,6 +59,62 @@ pub struct Device {
  }
  
  impl Device {
++    pub(crate) fn endpoint_context_words(&self)->Vec<Vec<u32>>{self.ctx.endpoint_words()}
++    pub(crate) fn input_slot_context_words(&self)->Vec<u32>{self.ctx.input_slot_words()}
++    pub(crate) fn slot_context_words(&self)->Vec<u32>{self.ctx.slot_words()}
++
 +    pub(crate) fn stream_place(&mut self,address:u8,stream:u16,words:[u32;4])->Result<(usize,bool,u64)> {
 +        Ok(self.stream_rings.get_mut(&(address,stream)).ok_or(USBError::NotFound)?.raw_place(words))
 +    }
@@ -454,7 +489,7 @@ index a7996fc..eb5ff20 100644
      pub(crate) async fn new(host: &mut Xhci) -> Result<Self> {
          let slot_id = host.device_slot_assignment().await?;
          debug!("Slot {slot_id} assigned");
-@@ -71,6 +127,8 @@ impl Device {
+@@ -71,6 +131,8 @@ impl Device {
          let desc = unsafe { core::mem::zeroed() };
  
          Ok(Self {
@@ -463,7 +498,7 @@ index a7996fc..eb5ff20 100644
              id: slot_id,
              ctx,
              bell,
-@@ -159,30 +217,108 @@ impl Device {
+@@ -159,30 +221,108 @@ impl Device {
          Ok(())
      }
  
@@ -588,7 +623,7 @@ index a7996fc..eb5ff20 100644
          // 直接使用 DeviceSpeed 枚举计算默认 max packet size
          let max_packet_size = parse_default_max_packet_size_from_port_speed(info.port_speed);
  
-@@ -204,9 +340,10 @@ impl Device {
+@@ -204,9 +344,10 @@ impl Device {
              parent_id = parent_hub.parent;
          }
  
@@ -601,7 +636,7 @@ index a7996fc..eb5ff20 100644
          // ctrl dci
          let dci = Dci::CTRL;
          // 1. Allocate an Input Context data structure (6.2.5) and initialize all fields to
-@@ -287,16 +424,11 @@ impl Device {
+@@ -287,16 +428,11 @@ impl Device {
              endpoint_0.set_max_packet_size(max_packet_size);
              // • Max Burst Size = 0.
              endpoint_0.set_max_burst_size(0);
@@ -623,7 +658,7 @@ index a7996fc..eb5ff20 100644
              // • Interval = 0.
              endpoint_0.set_interval(0);
              // • Max Primary Streams (MaxPStreams) = 0.
-@@ -326,14 +458,13 @@ impl Device {
+@@ -326,14 +462,13 @@ impl Device {
  
          mb();
  
@@ -642,7 +677,7 @@ index a7996fc..eb5ff20 100644
              .await?;
  
          debug!("Address slot ok {result:x?}");
-@@ -348,12 +479,10 @@ impl Device {
+@@ -348,12 +483,10 @@ impl Device {
      async fn get_device_descriptor_base(&mut self) -> Result<DeviceDescriptorBase> {
          let mut data = vec![0u8; 8];
  
@@ -659,7 +694,17 @@ index a7996fc..eb5ff20 100644
  
          Ok(desc)
      }
-@@ -528,7 +657,7 @@ impl Device {
+@@ -465,7 +598,8 @@ impl Device {
+             self.ep_interfaces.insert(desc.address, interface);
+ 
+             let xhci_interval =
+-                self.calculate_xhci_interval(desc.interval, desc.transfer_type, desc.interval);
++                self.calculate_xhci_interval(desc.interval, desc.transfer_type, desc.interval)?;
++            self.eps.get_mut(&desc.address).unwrap().with_raw_mut::<XhciEndpoint,_>(|ep|ep.configure_periodic_stride(xhci_interval));
+ 
+             self.ctx.with_input(|input| {
+                 let control_context = input.control_mut();
+@@ -528,7 +662,7 @@ impl Device {
              input
                  .device_mut()
                  .slot_mut()
@@ -668,7 +713,101 @@ index a7996fc..eb5ff20 100644
          });
          mb();
  
-@@ -765,3 +894,90 @@ impl DeviceOp for Device {
+@@ -591,78 +725,8 @@ impl Device {
+ 
+     /// 根据 XHCI 规范计算端点的 interval 值
+     /// 参考 xHCI 规范第 6.2.3.6 节
+-    fn calculate_xhci_interval(
+-        &self,
+-        binterval: u8,
+-        transfer_type: EndpointType,
+-        default: u8,
+-    ) -> u8 {
+-        match transfer_type {
+-            EndpointType::Isochronous => {
+-                match self.port_speed {
+-                    Speed::High | Speed::SuperSpeed | Speed::SuperSpeedPlus => {
+-                        // HighSpeed, SuperSpeed, SuperSpeedPlus ISO 端点
+-                        // Interval = max(1, min(16, bInterval))
+-                        let interval = binterval.clamp(1, 16);
+-                        debug!(
+-                            "ISO endpoint HS/SS: bInterval={} -> XHCI interval={}",
+-                            binterval, interval
+-                        );
+-                        interval
+-                    }
+-                    _ => {
+-                        // FullSpeed/LowSpeed ISO 端点
+-                        // Interval = max(1, min(16, floor(log2(bInterval)) + 3))
+-                        if binterval == 0 {
+-                            1
+-                        } else {
+-                            // 计算 floor(log2(bInterval))
+-                            let log2_binterval = 31 - (binterval as u32).leading_zeros() as u8 - 1;
+-                            let interval = (log2_binterval + 3).clamp(1, 16);
+-                            debug!(
+-                                "ISO endpoint FS/LS: bInterval={} -> log2={} -> XHCI interval={}",
+-                                binterval, log2_binterval, interval
+-                            );
+-                            interval
+-                        }
+-                    }
+-                }
+-            }
+-            EndpointType::Interrupt => {
+-                match self.port_speed {
+-                    Speed::High | Speed::SuperSpeed | Speed::SuperSpeedPlus => {
+-                        // HighSpeed, SuperSpeed, SuperSpeedPlus 中断端点
+-                        // Interval = max(1, min(16, bInterval))
+-                        let interval = binterval.clamp(1, 16);
+-                        debug!(
+-                            "INT endpoint HS/SS: bInterval={} -> XHCI interval={}",
+-                            binterval, interval
+-                        );
+-                        interval
+-                    }
+-                    _ => {
+-                        // FullSpeed/LowSpeed 中断端点
+-                        // Interval = max(1, min(16, floor(log2(bInterval)) + 3))
+-                        if binterval == 0 {
+-                            1
+-                        } else {
+-                            // 计算 floor(log2(bInterval))
+-                            let log2_binterval = 31 - (binterval as u32).leading_zeros() as u8 - 1;
+-                            let interval = (log2_binterval + 3).clamp(1, 16);
+-                            debug!(
+-                                "INT endpoint FS/LS: bInterval={} -> log2={} -> XHCI interval={}",
+-                                binterval, log2_binterval, interval
+-                            );
+-                            interval
+-                        }
+-                    }
+-                }
+-            }
+-            _ => {
+-                // 控制和批量端点不使用 interval
+-                default
+-            }
+-        }
++    fn calculate_xhci_interval(&self,binterval:u8,transfer_type:EndpointType,default:u8)->Result<u8>{
++        periodic_interval(self.port_speed,transfer_type,binterval,default)
+     }
+ 
+     async fn update_hub_inner(&mut self, params: HubParams) -> Result<()> {
+@@ -714,7 +778,11 @@ impl Device {
+             }
+         });
+ 
+-        self.evaluate().await?;
++        // Evaluate Context cannot update Hub/MTT/NumPorts (xHCI 6.2.2.3).
++        self.cmd.cmd_request(command::Allowed::ConfigureEndpoint(
++            *command::ConfigureEndpoint::default().set_slot_id(self.id.into())
++                .set_input_context_pointer(self.ctx.input_bus_addr())
++        )).await?;
+         Ok(())
+     }
+ }
+@@ -765,3 +833,113 @@ impl DeviceOp for Device {
          self.update_hub_inner(params).boxed()
      }
  }
@@ -759,8 +898,31 @@ index a7996fc..eb5ff20 100644
 +    Ok([(pointer as u32)|u32::from(cycle),(pointer>>32)as u32])
 +}
 +#[cfg(test)]mod dequeue_alignment{use super::*;#[test]fn trb_alignment_and_cycle_are_preserved(){assert_eq!(explicit_endpoint_dequeue_words(0x123400010030,true).unwrap(),[0x10031,0x1234]);assert_eq!(explicit_endpoint_dequeue_words(0x10030,false).unwrap(),[0x10030,0]);assert!(explicit_endpoint_dequeue_words(0x10031,false).is_err());}}
++
++// xHCI1.2 Table6-12: endpoint Interval is an exponent in125us units.
++fn periodic_interval(speed:Speed,kind:EndpointType,binterval:u8,default:u8)->Result<u8>{
++    match kind {
++        EndpointType::Isochronous if matches!(speed,Speed::Low)=>Err(USBError::NotSupported),
++        EndpointType::Isochronous|EndpointType::Interrupt if matches!(speed,Speed::High|Speed::SuperSpeed|Speed::SuperSpeedPlus)=>{
++            if !(1..=16).contains(&binterval){return Err(USBError::InvalidParameter);}Ok(binterval-1)
++        }
++        EndpointType::Isochronous=>{if !(1..=16).contains(&binterval){return Err(USBError::InvalidParameter);}Ok(binterval+2)}
++        EndpointType::Interrupt=>{if binterval==0{return Err(USBError::InvalidParameter);}Ok(((8*binterval as u32).ilog2()as u8).clamp(3,10))}
++        _=>Ok(default),
++    }
++}
++#[cfg(test)]mod periodic_intervals {use super::*;#[test]fn spec_interval_units_and_bounds(){
++ assert_eq!(periodic_interval(Speed::Full,EndpointType::Isochronous,1,0).unwrap(),3);
++ assert_eq!(periodic_interval(Speed::Full,EndpointType::Isochronous,16,0).unwrap(),18);
++ assert_eq!(periodic_interval(Speed::High,EndpointType::Isochronous,1,0).unwrap(),0);
++ assert_eq!(periodic_interval(Speed::SuperSpeed,EndpointType::Interrupt,16,0).unwrap(),15);
++ assert_eq!(periodic_interval(Speed::Full,EndpointType::Interrupt,255,0).unwrap(),10);
++ assert_eq!(periodic_interval(Speed::Low,EndpointType::Interrupt,1,0).unwrap(),3);
++ assert!(periodic_interval(Speed::Full,EndpointType::Isochronous,0,0).is_err());
++ assert!(periodic_interval(Speed::Low,EndpointType::Isochronous,1,0).is_err());
++}}
 diff --git a/usb-host/src/backend/kmod/xhci/endpoint.rs b/usb-host/src/backend/kmod/xhci/endpoint.rs
-index 5c11453..af70085 100644
+index 5c11453..0800d24 100644
 --- a/usb-host/src/backend/kmod/xhci/endpoint.rs
 +++ b/usb-host/src/backend/kmod/xhci/endpoint.rs
 @@ -95,6 +95,10 @@ pub struct Endpoint {
@@ -774,15 +936,26 @@ index 5c11453..af70085 100644
      inflight: BTreeMap<EndpointRequestId, SubmittedTd>,
      trb_to_request: BTreeMap<TransferId, EndpointRequestId>,
      outstanding_trbs: usize,
-@@ -112,6 +116,7 @@ unsafe impl Sync for Endpoint {}
+@@ -104,6 +108,8 @@ pub struct Endpoint {
+     interval: u8,
+     iso_start_asap: bool,
+     next_iso_frame_id: u16,
++    iso_interval:u8,
++    iso_phase:u8,
+ }
+ 
+ unsafe impl Send for Endpoint {}
+@@ -112,6 +118,9 @@ unsafe impl Sync for Endpoint {}
  const ENDPOINT_RING_PAGES: usize = 16;
  
  impl Endpoint {
-+    pub(crate) fn iso_schedule(&mut self,asap:bool,frame:u16) {self.iso_start_asap=asap;self.next_iso_frame_id=frame&0x7ff;}
++    pub(crate) fn configure_periodic_stride(&mut self,interval:u8){self.iso_interval=interval;}
++
++    pub(crate) fn iso_schedule(&mut self,asap:bool,frame:u16) {self.iso_start_asap=asap;self.next_iso_frame_id=frame;self.iso_phase=0;}
      pub fn new(dci: Dci, kernel: &Kernel, bell: Arc<Mutex<SlotBell>>) -> crate::err::Result<Self> {
          let ring =
              SendRing::new_with_pages(ENDPOINT_RING_PAGES, DmaDirection::Bidirectional, kernel)?;
-@@ -121,6 +126,7 @@ impl Endpoint {
+@@ -121,6 +130,7 @@ impl Endpoint {
              ring,
              bell,
              next_request_id: 1,
@@ -790,7 +963,11 @@ index 5c11453..af70085 100644
              inflight: BTreeMap::new(),
              trb_to_request: BTreeMap::new(),
              outstanding_trbs: 0,
-@@ -133,6 +139,32 @@ impl Endpoint {
+@@ -130,9 +140,36 @@ impl Endpoint {
+             interval: 1,
+             iso_start_asap: true,
+             next_iso_frame_id: 0,
++            iso_interval:3,iso_phase:0,
          })
      }
  
@@ -823,7 +1000,7 @@ index 5c11453..af70085 100644
      pub fn configure_periodic(
          &mut self,
          max_packet_size: usize,
-@@ -145,6 +177,11 @@ impl Endpoint {
+@@ -145,6 +182,11 @@ impl Endpoint {
          self.iso_start_asap = true;
      }
  
@@ -835,7 +1012,7 @@ index 5c11453..af70085 100644
      pub fn bus_addr(&self) -> BusAddr {
          self.ring.bus_addr()
      }
-@@ -215,12 +252,7 @@ impl Endpoint {
+@@ -215,12 +257,7 @@ impl Endpoint {
          Ok(())
      }
  
@@ -849,7 +1026,7 @@ index 5c11453..af70085 100644
          let submitted = self.inflight.remove(&request_id).ok_or_else(|| {
              warn!(
                  "xhci: completion for missing request dci={} request_id={} event_trb={:#x}",
-@@ -230,6 +262,7 @@ impl Endpoint {
+@@ -230,6 +267,7 @@ impl Endpoint {
              );
              TransferError::InvalidEndpoint
          })?;
@@ -857,7 +1034,7 @@ index 5c11453..af70085 100644
          self.outstanding_trbs = self.outstanding_trbs.saturating_sub(submitted.trb_count);
          match &submitted.kind {
              SubmittedTdKind::Normal { completion_trb } => {
-@@ -247,6 +280,16 @@ impl Endpoint {
+@@ -247,6 +285,16 @@ impl Endpoint {
              }
          }
  
@@ -874,7 +1051,7 @@ index 5c11453..af70085 100644
          if submitted.cancelled {
              return Err(TransferError::Cancelled);
          }
-@@ -303,7 +346,7 @@ impl Endpoint {
+@@ -303,7 +351,7 @@ impl Endpoint {
              }
              SubmittedTdKind::Normal { .. } => {
                  let remaining = event.trb_transfer_length() as usize;
@@ -883,7 +1060,7 @@ index 5c11453..af70085 100644
              }
              SubmittedTdKind::Iso { .. } => unreachable!("ISO was handled above"),
          };
-@@ -327,6 +370,11 @@ impl Endpoint {
+@@ -327,6 +375,11 @@ impl Endpoint {
                  continue;
              };
              let remaining = event.trb_transfer_length() as usize;
@@ -895,7 +1072,7 @@ index 5c11453..af70085 100644
              if let Some(submitted) = self.inflight.get_mut(&request_id)
                  && let SubmittedTdKind::Control(control_td) = &mut submitted.kind
              {
-@@ -334,7 +382,7 @@ impl Endpoint {
+@@ -334,7 +387,7 @@ impl Endpoint {
                      ControlStage::Setup => {}
                      ControlStage::Data => {
                          control_td.actual =
@@ -904,7 +1081,30 @@ index 5c11453..af70085 100644
                      }
                      ControlStage::Status if control_td.actual.is_none() => {
                          control_td.actual = Some(control_td.requested);
-@@ -597,10 +645,13 @@ impl Endpoint {
+@@ -482,7 +535,8 @@ impl Endpoint {
+         let mut packets = Vec::with_capacity(packet_lengths.len().max(1));
+         let mut offset = 0u64;
+         let packet_count = packet_lengths.len().max(1);
+-        let interval = self.interval.max(1);
++        let interval = self.iso_interval;
++        let mut phase=self.iso_phase;
+         let mut frame_id = self.next_iso_frame_id;
+ 
+         for index in 0..packet_count {
+@@ -503,10 +557,11 @@ impl Endpoint {
+                 actual: None,
+             });
+             offset += packet_length as u64;
+-            frame_id = frame_id.wrapping_add(interval as u16) & 0x7ff;
++            (frame_id,phase)=advance_iso_frame(frame_id,phase,interval);
+         }
+ 
+         self.next_iso_frame_id = frame_id;
++        self.iso_phase=phase;
+         packets
+     }
+ 
+@@ -597,10 +652,13 @@ impl Endpoint {
  
  impl EndpointOp for Endpoint {
      fn submit_request(&mut self, request: TransferRequest) -> Result<RequestId, TransferError> {
@@ -920,7 +1120,7 @@ index 5c11453..af70085 100644
  
          let mut data_bus_addr = 0;
          if transfer.buffer_len() > 0 {
-@@ -608,10 +659,10 @@ impl EndpointOp for Endpoint {
+@@ -608,10 +666,10 @@ impl EndpointOp for Endpoint {
                  transfer.confirm_write_all();
              }
              data_bus_addr = transfer.dma_addr();
@@ -934,7 +1134,7 @@ index 5c11453..af70085 100644
                      data_bus_addr,
                      buffer_end,
                      self.kernel.dma_mask()
-@@ -642,30 +693,34 @@ impl EndpointOp for Endpoint {
+@@ -642,30 +700,34 @@ impl EndpointOp for Endpoint {
  
                  let mut data = None;
  
@@ -978,7 +1178,7 @@ index 5c11453..af70085 100644
  
                  let has_data_stage = data.is_some();
                  let mut control_trbs: Vec<transfer::Allowed> = vec![setup.into()];
-@@ -882,3 +937,67 @@ impl EndpointDescriptorExt for EndpointDescriptor {
+@@ -882,3 +944,70 @@ impl EndpointDescriptorExt for EndpointDescriptor {
          }
      }
  }
@@ -1046,6 +1246,9 @@ index 5c11453..af70085 100644
 +  ep.begin_stop();assert!(ep.idle_dequeue().is_err());
 + }
 +}
++
++fn advance_iso_frame(frame:u16,phase:u8,interval:u8)->(u16,u8){let next=((frame as u32)<<3)+phase as u32+(1u32<<interval);(((next>>3)&0x7ff)as u16,(next&7)as u8)}
++#[cfg(test)]mod iso_frame_advance{use super::*;#[test]fn microframe_steps_and_frame_wrap(){assert_eq!(advance_iso_frame(5,0,0),(5,1));assert_eq!(advance_iso_frame(5,7,0),(6,0));assert_eq!(advance_iso_frame(5,0,3),(6,0));assert_eq!(advance_iso_frame(5,0,6),(13,0));assert_eq!(advance_iso_frame(2047,7,0),(0,0));}}
 diff --git a/usb-host/src/backend/kmod/xhci/event.rs b/usb-host/src/backend/kmod/xhci/event.rs
 index 27eeae2..c24c741 100644
 --- a/usb-host/src/backend/kmod/xhci/event.rs

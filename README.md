@@ -373,7 +373,7 @@ validation. Remaining gates are [isolated target #32](https://github.com/wilsonb
 | [ep0_packet_size](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/usb.rs) | `packet_size` | implemented | compiled, fake_tested, emulated_tested | set the explicitly selected speed-valid EP0 packet size |
 | [select_configuration](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/usb.rs) | `configuration` | implemented | compiled, fake_tested, emulated_tested | send explicit SET_CONFIGURATION and update device state |
 | [select_interface](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/usb.rs) | `interface` | implemented | compiled, fake_tested | fake-tested; nonzero alternate behavior is not guest-validated |
-| [host_endpoints](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/usb.rs) | `endpoints` | implemented | compiled, fake_tested, emulated_tested | control/bulk/interrupt profile; hubs, streams and isochronous I/O not exposed |
+| [host_endpoints](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/usb.rs) | `endpoints` | implemented | compiled, fake_tested, emulated_tested | root-device enumeration convenience; raw topology, streams and isochronous operations use the explicit surface |
 | [control_complete](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/requests.rs) | `submit` | implemented | compiled, fake_tested, emulated_tested | reported code is the terminal TD event; intermediate events remain in emulator trace |
 | [bulk_interrupt](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/requests.rs) | `submit` | implemented | compiled, fake_tested, emulated_tested | Low Speed bulk rejected; pending means submitted, not an electrical bus-active sensor |
 | [control_plan](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/explicit.rs) | `control_plan` | implemented | compiled, fake_tested, emulated_tested | full plan only; arbitrary partial/delayed stages not exposed |
@@ -397,13 +397,13 @@ validation. Remaining gates are [isolated target #32](https://github.com/wilsonb
 | [timing_guarantees](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/models/control_plan.rs) | — | unsupported | static_review | ordering/deadlines are software controls; physical timing remains unmeasured |
 | [physical_intel_validation](https://github.com/wilsonborba/fah/blob/feature/main/lib/presentation/cli/handlers.rs) | — | planned | unresolved | see #32 and #33; notebook controller takeover remains blocked |
 | [ipad_a5_case_study](https://github.com/wilsonborba/fah/blob/feature/main/lib/presentation/cli/handlers.rs) | — | planned | unresolved | see #34; emulated USB success establishes no boot/exploitation capability |
-| [isochronous](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
-| [bulk_streams](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
-| [hub_topology](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
-| [scatter_gather](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
-| [protocol_inspection](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
-| [explicit_event_drain](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
-| [ordering_controls](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
+| [isochronous](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested, emulated_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
+| [bulk_streams](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested, emulated_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
+| [hub_topology](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested, emulated_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
+| [scatter_gather](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested, emulated_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
+| [protocol_inspection](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested, emulated_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
+| [explicit_event_drain](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested, emulated_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
+| [ordering_controls](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested, emulated_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
 <!-- FAH_CAPABILITIES_END -->
 
 ## References and license
@@ -427,11 +427,11 @@ preserved upstream texts and reviewed omissions; `--write-notices` regenerates
 notice, source snapshot, patches, checksums and dependency provenance. See
 [third-party notices](THIRD_PARTY_NOTICES.md) and [modifications](NOTICE).
 
-On the clean release, after rebuilding/preparing and passing the six required fresh
+On the clean release, after rebuilding/preparing and passing the eight required fresh
 runs, package their exact generated directories:
 
 ```text
-python3 scripts/release.py candidate --evidence <feasibility-run> --evidence <fixture-run> --evidence <smoke-run-1> --evidence <smoke-run-2> --evidence <explicit-run> --evidence <faults-run>
+python3 scripts/release.py candidate --evidence <feasibility-run> --evidence <fixture-run> --evidence <smoke-run-1> --evidence <smoke-run-2> --evidence <explicit-run> --evidence <faults-run> --evidence <m8-run> --evidence <topology-run>
 ```
 
 Each evidence argument is an absolute `docs/evidence/<run>` path. Packaging
@@ -492,17 +492,26 @@ controls. Linux scheduling and physical packet timing remain unverified.
 
 For downstream devices, `slot_enable`, `address_route` and `hub_configure` expose
 route, speed and TT fields. `device_descriptor`, `device_configuration` and
-`endpoint_configure` prepare devices explicitly. `iso_schedule` selects ASAP or
+`endpoint_configure` prepare devices explicitly. `slot_context` reads the output
+Slot Context, including the Hub flag and port count, without mutating it. `iso_schedule` selects ASAP or
 Frame ID. Ordinary `submit` accepts `isochronous`; `iso_packets` accepts an explicit
 packet-length array. `stream_configure` checks controller and device stream limits,
 creates primary arrays and retains a separate ring for each Stream ID. Select
 `{"kind":"stream","slot":1,"endpoint":129,"stream":1}` as the ring for placement,
 then ring the matching Stream ID explicitly. Controller/device support is required.
 
-Literal mutations invalidate the managed view before execution, including partial
-failure. Raw operations and coordinated close remain available. `reconcile`
-reports unknown state and required reconstruction; matching register values do
-not silently restore the old managed device view. Close/reopen rebuilds it.
+Known slot mutations bump a scoped generation and hold that slot's managed view;
+other slots remain usable. `reconcile` compares a known controller-only effect with
+the original owned Slot and Endpoint Context snapshot, with no pending DMA or
+device-state uncertainty. Device mutations require explicit reconstruction; matching
+controller contexts cannot clear them. Unrecognized commands, vendor SETUPs and
+direct ring/MMIO/doorbell mutations invalidate the global managed view. Readback
+never clears unknown global effects. Raw access stays available; coordinated
+close/reopen reconstructs a clean owner. Event correlation and buffer quiescence
+remain independent of managed-view reconciliation.
+
+The owner reserves Link entries and canonicalizes EP0 direction aliases to one
+physical ring identity. Caller fields in ordinary literal TRBs are preserved.
 
 Resource limits are explicit: 128 literal reservations per ring until close,
 4096 staged TRBs, 65536 retained raw events, 256MiB per raw allocation, 4096 primary
@@ -510,7 +519,11 @@ stream entries, 64KiB ordinary single-buffer requests and 128 iso packets per
 convenience request. Literal data/ring construction remains available through DMA
 and MMIO. These are implementation budgets, not claimed xHCI hardware limits.
 
-New capabilities are compiled and tested with synthetic resources. Release evidence
-records which paths passed in the emulated guest. Physical Intel behavior and the
-separate case study remain in M7. A stream fixture is required before claiming
-end-to-end stream I/O; capability detection and synthetic tests do not prove it.
+Release suites exercise the emulated controller with a downstream USB audio device,
+a hub, and a SuperSpeed UAS device. They check isochronous completion, routed
+descriptors, stream INQUIRY data and status, and large chained transfers. QEMU 10
+only copies Context Entries during Configure Endpoint: hub input fields and the
+emitted command are checked, while output Hub/NumPorts persistence remains
+unvalidated on hardware. Independent
+xHCI traces accompany guest assertions. Physical Intel behavior and the separate
+case study remain in M7; emulated success does not establish physical timing.

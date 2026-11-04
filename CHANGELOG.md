@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.2.0] - 2026-11-04
+
+### Features
+- **raw:** Define literal operations and xHCI transfer contracts (#18) ([c500af6](https://github.com/wilsonborba/fah/commit/c500af6e82f593f5dcb25a010c495379e8e12b76))
+- **events:** Wake the sole consumer for acknowledged explicit drains (#74) ([b286534](https://github.com/wilsonborba/fah/commit/b28653427233bdec1f5aae3dbe538c10a1d6d8d0))
+- **raw:** Expose literal operations through the sole controller owner (#68, #73, #75, #79) ([5bf464d](https://github.com/wilsonborba/fah/commit/5bf464deb85b70880922ee5b5713e1c40feae796))
+- **iso:** Expose packet requests and explicit frame scheduling (#65) ([a2ff806](https://github.com/wilsonborba/fah/commit/a2ff8062eb0f41667c07dc5148ae67cd8e5619d0))
+- **topology:** Expose hub contexts and explicit route addressing (#67) ([a59d54d](https://github.com/wilsonborba/fah/commit/a59d54d53e99b71d176b8279d3be217c284e1a29))
+- **streams:** Configure primary arrays and per-stream owned rings (#66) ([ee35556](https://github.com/wilsonborba/fah/commit/ee35556e82920085b6e861a84fe92a9bc3580d87))
+- **transfers:** Compose boundary-aware scatter-gather TDs (#76) ([58bff0d](https://github.com/wilsonborba/fah/commit/58bff0d56b5073e5a4b102f1aa774d4dfabbb546))
+- **raw:** Classify completions and expose ordering controls (#69, #77) ([c54888c](https://github.com/wilsonborba/fah/commit/c54888c7e9dccf91a1eb2788ea22e9f0642fe8c1))
+- **release:** Prepare v0.2.0 and require M8 guest evidence (#78) ([bc58d5e](https://github.com/wilsonborba/fah/commit/bc58d5e9ec6a7c36784f7ca02d73b8872fdb6c66))
+- **capabilities:** Decode PSI fields and record emulated M8 coverage (#73) ([38f3c9f](https://github.com/wilsonborba/fah/commit/38f3c9f72222bc623a26e9873a7e5b4d25f0cad1))
+
+### Fixes
+- **tests:** Move the VM lab and test runners from scripts/ into tests/ (#64) ([c6b08ae](https://github.com/wilsonborba/fah/commit/c6b08ae88401a89cc7044c365e40bfdd30587c68))
+- **tests:** Discover all lab cases during direct execution (#72) ([7a019ac](https://github.com/wilsonborba/fah/commit/7a019ac68e51617a1b074f591e419623cbf4301e))
+- **release:** Derive lab and packaging branch from Cargo version (#71) ([804d307](https://github.com/wilsonborba/fah/commit/804d30724e1052aa5cd6bc542c864a975b957cae))
+- **lab:** Accept the explicitly expected stale-handle exit (#80) ([f129a05](https://github.com/wilsonborba/fah/commit/f129a05bc02ad1a79d1ae3d4c99714f10941e055))
+- **xhci:** Encode periodic intervals and advance FrameID in microframes (#81) ([c9f8aea](https://github.com/wilsonborba/fah/commit/c9f8aea2693ee33c1149d7a001683c3dfb870b22))
+- **hub:** Update slot hub fields through Configure Endpoint (#82) ([7758444](https://github.com/wilsonborba/fah/commit/7758444f868ca195534642d7c2093721d3b6114d))
+- **events:** Advance raw completion cursors beyond the first page (#83) ([e1e08fb](https://github.com/wilsonborba/fah/commit/e1e08fb741a2931df3013f0dcdc7dd3e441d31a9))
+- **raw:** Track scoped generations and require contextual reconcile proof (#84) ([0920003](https://github.com/wilsonborba/fah/commit/09200038f83b1c7056bba9199157082b0670edbf))
+- **raw:** Canonicalize physical ring identities and preserve owner Links (#85) ([729183b](https://github.com/wilsonborba/fah/commit/729183b06698c6c32f1f469382bfb4011b25a577))
+- **release:** Include M8 and topology validation reports in the candidate (#86) ([af21b12](https://github.com/wilsonborba/fah/commit/af21b12a7b28d6e855f87104c72bf65ead18df81))
+
+### Documentation
+- **release:** Generate v0.2.0 changelog (#78) ([26d8289](https://github.com/wilsonborba/fah/commit/26d82894115bd1dcc0defb16f9bef23ae54ade5c))
+
+### Validation
+- **lab:** Add isolated hub audio and UAS stream fixtures (#78) ([0f699f5](https://github.com/wilsonborba/fah/commit/0f699f5377f675fa153f9150a7022f34731aae86))
+- **hub:** Distinguish prepared context from QEMU output limitations (#82) ([8c9f4c7](https://github.com/wilsonborba/fah/commit/8c9f4c72b85e16b5378d31c0fa13b7963c2e6557))
+- **raw:** Isolate known reconcile proof from unknown DMA references (#84) ([255ba88](https://github.com/wilsonborba/fah/commit/255ba881548a5f908f1b8fa214917aad2e370131))
+- **raw:** Avoid shadowing the allocation inspection helper (#84) ([f925ea3](https://github.com/wilsonborba/fah/commit/f925ea32cb7d6e7f81d90c19448dd1beda001f9d))
 ## [0.1.0] - 2026-11-03
 
 ### Features
@@ -60,6 +94,7 @@
 - **vm:** Describe fixture commands, resource limits and evidence scope (#25) ([18c510a](https://github.com/wilsonborba/fah/commit/18c510a8254eb871c60f7a6305d6e9f8d766d5a7))
 - Publish reproducible guest setup and complete explicit CLI protocol (#30) ([b61eb95](https://github.com/wilsonborba/fah/commit/b61eb95666002b5706d45d21f27cc03d7767ad07))
 - **release:** Generate v0.1.0 changelog with git-cliff (#31) ([d2cb28a](https://github.com/wilsonborba/fah/commit/d2cb28aea5af949346d72b37fcf9f6bb80921bb5))
+- **release:** Regenerate v0.1.0 changelog with git-cliff (#31) ([8e4a32a](https://github.com/wilsonborba/fah/commit/8e4a32ae59881eea1592fa6207d59814f945cb89))
 
 ### Validation
 - **session:** Bound stalled backend futures without an executor ([b7cbf1a](https://github.com/wilsonborba/fah/commit/b7cbf1a032a876ca6795d681115217dfb95616df))
