@@ -74,6 +74,59 @@ impl<P: MappingProvider> DmaAdapter<P> {
     pub fn retained_allocations(&self) -> usize {
         self.state.lock().unwrap().allocations.len()
     }
+    pub fn raw_allocate(&self, size: usize, alignment: usize) -> Result<Lease, String> {
+        let (_, iova) = self.allocate_sized(size, alignment, self.mask, false)?;
+        self.mapping_lease(iova)
+            .ok_or_else(|| "raw mapping missing".into())
+    }
+    pub fn raw_retire(&self, lease: Lease) -> Result<(), String> {
+        if self.mapping_lease(lease.iova) != Some(lease) {
+            return Err("stale raw lease".into());
+        }
+        self.retire(lease.iova);
+        Ok(())
+    }
+    pub fn raw_read(&self, lease: Lease, offset: usize, length: usize) -> Result<Vec<u8>, String> {
+        let state = self.state.lock().map_err(|_| "DMA state poisoned")?;
+        let allocation = state
+            .allocations
+            .get(&lease.iova)
+            .filter(|a| a.lease == lease)
+            .ok_or("stale raw lease")?;
+        if offset
+            .checked_add(length)
+            .is_none_or(|end| end > allocation.layout.size())
+        {
+            return Err("raw DMA range outside allocation".into());
+        }
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+        Ok((offset..offset + length)
+            .map(|i| unsafe { (allocation.cpu as *const u8).add(i).read_volatile() })
+            .collect())
+    }
+    pub fn raw_write(&self, lease: Lease, offset: usize, bytes: &[u8]) -> Result<(), String> {
+        let state = self.state.lock().map_err(|_| "DMA state poisoned")?;
+        let allocation = state
+            .allocations
+            .get(&lease.iova)
+            .filter(|a| a.lease == lease)
+            .ok_or("stale raw lease")?;
+        if offset
+            .checked_add(bytes.len())
+            .is_none_or(|end| end > allocation.layout.size())
+        {
+            return Err("raw DMA range outside allocation".into());
+        }
+        for (i, byte) in bytes.iter().enumerate() {
+            unsafe {
+                (allocation.cpu as *mut u8)
+                    .add(offset + i)
+                    .write_volatile(*byte);
+            }
+        }
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
     pub fn last_error(&self) -> Option<String> {
         self.state.lock().unwrap().error.clone()
     }
@@ -84,7 +137,19 @@ impl<P: MappingProvider> DmaAdapter<P> {
         mask: u64,
         streaming: bool,
     ) -> Result<(usize, u64), String> {
-        if size == 0 || size > 65536 || !alignment.is_power_of_two() {
+        if size > 65536 {
+            return Err("ring/single-TRB allocation exceeds64KiB".into());
+        }
+        self.allocate_sized(size, alignment, mask, streaming)
+    }
+    fn allocate_sized(
+        &self,
+        size: usize,
+        alignment: usize,
+        mask: u64,
+        streaming: bool,
+    ) -> Result<(usize, u64), String> {
+        if size == 0 || size > 256 * 1024 * 1024 || !alignment.is_power_of_two() {
             return Err(
                 "single-segment allocation must be 1..=65536 bytes with power-of-two alignment"
                     .into(),

@@ -49,6 +49,9 @@ pub const MAX_LINE: usize = 1024 * 1024;
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ShellCommand {
+    Raw {
+        request: crate::domain::models::raw::RawOperation,
+    },
     Help,
     Version,
     Capabilities,

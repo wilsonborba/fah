@@ -33,6 +33,20 @@ pub const SPECIFICATION: &str = "https://www.intel.com/content/dam/www/public/us
 pub fn registry() -> Vec<Capability> {
     vec![
         Capability {
+            operation: "literal_owner_operations",
+            commands: &["raw"],
+            availability: Availability::Implemented,
+            boundary: Boundary::LibraryProfile,
+            evidence: &["compiled"],
+            precondition: "initialized emulated owner; action-specific handles and bounds",
+            effect: "explicit DMA, literal TRB placement/publication, MMIO, doorbells and acknowledged single-consumer drain",
+            specification: "xHCI4.9,4.17,5,6.4",
+            implementation: "lib/dal/local/controller_raw.rs",
+            validation: &["tests/raw_contract.rs", "tests/events.rs", "tests/dma.rs"],
+            runs: &[],
+            limits: "unknown raw effects invalidate managed state and retain raw DMA until coordinated close; literal ring reservations bounded per session",
+        },
+        Capability {
             operation: "metadata_queries",
             commands: &["help", "version", "capabilities"],
             effect: "describe syntax/version/capabilities without controller acquisition",
