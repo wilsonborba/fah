@@ -252,7 +252,7 @@ def package(output, evidence, metadata, records, sources):
             shutil.copy2(text['_path'], destination / text['name'])
     (stage / 'dependency-licenses.json').write_text(json.dumps([public_record(record) for record in records], indent=2, ensure_ascii=False) + '\n')
     (stage / 'capabilities.json').write_text(json.dumps(capabilities, indent=2) + '\n')
-    evidence_files = ['manifest.json', 'command.json', 'result.json', 'serial.log', 'events.json', 'xhci.trace', 'pci.json', 'qemu.stderr', 'trace-validation.json', 'failure-matrix.json']
+    evidence_files = ['manifest.json', 'command.json', 'result.json', 'serial.log', 'events.json', 'xhci.trace', 'pci.json', 'qemu.stderr', 'trace-validation.json', 'failure-matrix.json', 'm8-validation.json', 'topology-validation.json']
     for run in runs:
         destination = stage / 'evidence' / run['id']
         destination.mkdir(parents=True)
@@ -270,9 +270,13 @@ Binary SHA256: {binary_hash}
 Target: {TARGET}; tested Rust1.91.1 / Debian13 userspace.
 
 The candidate includes the executable, source snapshot, maintained patches,
-license texts/notices, provenance/checksums and six fresh guest runs from this exact
+license texts/notices, provenance/checksums and {len(runs)} fresh guest runs from this exact
 commit/binary. It validates control/bulk/interrupt I/O, eleven independent trace
-windows and eleven fault/recovery cases. See README and evidence manifests.
+windows and eleven fault/recovery cases, literal publication and interrupt-free drain,
+scoped reconciliation, chained large transfers, downstream audio isochronous I/O
+and UAS primary-stream INQUIRY/status. Hub input fields are verified; QEMU does
+not persist output Hub/NumPorts fields, which remains a physical evidence gap.
+See README and evidence manifests.
 
 Before the dependency inventory and again after a clean build with the pinned
 toolchain, the packaging tool compared every file of the prepared CrabUSB and
