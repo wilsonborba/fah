@@ -8,6 +8,13 @@ pub struct Handle {
     pub session: u64,
     pub sequence: u64,
 }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DmaSlice {
+    pub handle: Handle,
+    pub offset: usize,
+    pub length: usize,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Ring {
@@ -18,6 +25,19 @@ pub enum Ring {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RawOperation {
+    ScatterTransfer {
+        slot: u8,
+        endpoint: u8,
+        segments: Vec<DmaSlice>,
+        max_packet: u16,
+        input: bool,
+    },
+    NormalBuild {
+        iova: u64,
+        length: usize,
+        max_packet: u16,
+        input: bool,
+    },
     StreamConfigure {
         slot: u8,
         endpoint: u8,
@@ -222,6 +242,41 @@ pub fn normal_td(
         if last {
             break;
         }
+    }
+    Ok(trbs)
+}
+
+pub fn scatter_td(
+    segments: &[(u64, usize)],
+    max_packet: u16,
+    input: bool,
+) -> Result<Vec<[u32; 4]>, OperationError> {
+    if segments.is_empty() || max_packet == 0 {
+        return Err(OperationError::validation(
+            "segments and packet size required",
+        ));
+    }
+    let total = segments
+        .iter()
+        .try_fold(0usize, |sum, (_, length)| sum.checked_add(*length))
+        .ok_or_else(|| OperationError::validation("scatter length overflow"))?;
+    let packets = total.div_ceil(max_packet as usize);
+    let mut trbs = Vec::new();
+    for (iova, length) in segments {
+        trbs.extend(normal_td(*iova, *length, max_packet, input)?);
+    }
+    let mut done = 0usize;
+    let count = trbs.len();
+    for (index, trb) in trbs.iter_mut().enumerate() {
+        done += (trb[2] & 0x1ffff) as usize;
+        let last = index + 1 == count;
+        let size = if last {
+            0
+        } else {
+            packets.saturating_sub(done / max_packet as usize).min(31)
+        };
+        trb[2] = (trb[2] & 0x1ffff) | ((size as u32) << 17);
+        trb[3] = (trb[3] & !((1 << 4) | (1 << 5))) | if last { 1 << 5 } else { 1 << 4 };
     }
     Ok(trbs)
 }
