@@ -113,14 +113,15 @@ class EvidenceGate(unittest.TestCase):
     def test_candidate_refuses_stale_binary_commit_or_incomplete_suite_set(self):
         with tempfile.TemporaryDirectory()as directory:
             paths=[]
-            for index,suite in enumerate(['feasibility','fixture','smoke','smoke','explicit','faults']):
+            for index,suite in enumerate(['feasibility','fixture','smoke','smoke','explicit','faults','m8']):
                 path=pathlib.Path(directory)/str(index);path.mkdir();paths.append(path)
                 (path/'.fah-lab-run').touch()
                 (path/'result.json').write_text(json.dumps(dict(success=True,qemu_exit=0,suite=suite)))
                 (path/'manifest.json').write_text(json.dumps(dict(commit='rev',sources={str(ROOT/'target/release/fah'):'bin'})))
                 if suite=='explicit':(path/'trace-validation.json').write_text(json.dumps([dict(phase=name,verified=True)for name in sorted(release.TRACE_PHASES)]))
                 if suite=='faults':(path/'failure-matrix.json').write_text(json.dumps([dict(name=name,verified=True)for name in sorted(release.FAULT_CASES)]))
-            self.assertEqual(len(release.verified_runs(paths,'rev','bin')),6)
+                if suite=='m8':(path/'m8-validation.json').write_text(json.dumps(dict(verified=True,independent_trace=True,cases=[dict(name=name,verified=True)for name in release.RELEASE_CONTEXT.M8_CASES])))
+            self.assertEqual(len(release.verified_runs(paths,'rev','bin')),7)
             for candidates,commit,binary in [(paths,'old','bin'),(paths,'rev','changed'),(paths[:-1],'rev','bin')]:
                 with self.assertRaises(ValueError):release.verified_runs(candidates,commit,binary)
             with self.assertRaises(ValueError):release.verified_runs(paths+[paths[0]],'rev','bin')

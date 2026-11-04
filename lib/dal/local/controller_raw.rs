@@ -265,6 +265,9 @@ impl LocalController {
                 asap,
                 frame_id,
             } => {
+                if frame_id > 0x7ff {
+                    return Err(OperationError::validation("FrameID exceeds11bits"));
+                }
                 self.host
                     .as_mut()
                     .ok_or_else(|| OperationError::validation("host unavailable"))?
@@ -631,8 +634,12 @@ impl LocalController {
                         stream: 0,
                     },
                 )?;
+                let addresses: Vec<_> = tokens
+                    .iter()
+                    .map(|token| self.raw.placed[&token.sequence].3)
+                    .collect();
                 Ok(
-                    json!({"publish_tokens":tokens,"managed_state":"unknown","completion":"observe raw events"}),
+                    json!({"publish_tokens":tokens,"trb_iovas":addresses,"managed_state":"unknown","completion":"observe raw events"}),
                 )
             }
             Op::Reconcile { slot } => Ok(

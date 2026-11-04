@@ -1,6 +1,8 @@
 """Shared version and branch contract for the lab and release tools."""
 import tomllib
 
+M8_CASES = {'capabilities', 'dma_large', 'scatter_read10', 'bei_drain', 'literal_noop', 'unknown_retention', 'session_handles'}
+
 
 def package_version(root):
     version = tomllib.loads((root / 'Cargo.toml').read_text())['package']['version']

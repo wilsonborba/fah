@@ -160,8 +160,15 @@ def verified_runs(paths, commit, binary_hash):
             matrix = json.loads((path / 'failure-matrix.json').read_text())
             if len(matrix) != 11 or {row.get('name')for row in matrix}!=FAULT_CASES or not all(row['verified'] for row in matrix):
                 raise ValueError('guest failure matrix incomplete')
+        if result['suite']=='m8':
+            validation=json.loads((path/'m8-validation.json').read_text())
+            cases={row.get('name')for row in validation['cases']if row.get('verified')}
+            if not validation['verified'] or not validation['independent_trace'] or not RELEASE_CONTEXT.M8_CASES.issubset(cases):
+                raise ValueError('M8 guest evidence incomplete')
         runs.append(dict(id=path.name, suite=result['suite'], commit=commit, binary_sha256=binary_hash, _path=path))
     suites = [run['suite'] for run in runs]
+    if tuple(map(int,RELEASE_CONTEXT.package_version(ROOT).split('.')[:2]))>=(0,2) and 'm8'not in suites:
+        raise ValueError('M8 release requires fresh M8 guest evidence')
     if len({run['id'] for run in runs}) != len(runs) or suites.count('smoke') < 2 or not {'feasibility', 'fixture', 'explicit', 'faults'}.issubset(suites):
         raise ValueError('candidate requires distinct fresh feasibility/fixture/smoke/smoke/explicit/faults runs')
     return runs
