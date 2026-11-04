@@ -76,6 +76,9 @@ pub enum RawOperation {
         #[serde(default)]
         bsr: bool,
     },
+    SlotContext {
+        slot: u8,
+    },
     HubConfigure {
         slot: u8,
         root_port: u8,

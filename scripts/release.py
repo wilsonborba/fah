@@ -165,10 +165,15 @@ def verified_runs(paths, commit, binary_hash):
             cases={row.get('name')for row in validation['cases']if row.get('verified')}
             if not validation['verified'] or not validation['independent_trace'] or not RELEASE_CONTEXT.M8_CASES.issubset(cases):
                 raise ValueError('M8 guest evidence incomplete')
+        if result['suite']=='topology':
+            validation=json.loads((path/'topology-validation.json').read_text())
+            cases={row.get('name')for row in validation['cases']if row.get('verified')}
+            if not validation['verified'] or not validation['independent_trace'] or not RELEASE_CONTEXT.TOPOLOGY_CASES.issubset(cases):
+                raise ValueError('topology guest evidence incomplete')
         runs.append(dict(id=path.name, suite=result['suite'], commit=commit, binary_sha256=binary_hash, _path=path))
     suites = [run['suite'] for run in runs]
-    if tuple(map(int,RELEASE_CONTEXT.package_version(ROOT).split('.')[:2]))>=(0,2) and 'm8'not in suites:
-        raise ValueError('M8 release requires fresh M8 guest evidence')
+    if tuple(map(int,RELEASE_CONTEXT.package_version(ROOT).split('.')[:2]))>=(0,2) and not {'m8','topology'}.issubset(suites):
+        raise ValueError('M8 release requires fresh M8 and topology guest evidence')
     if len({run['id'] for run in runs}) != len(runs) or suites.count('smoke') < 2 or not {'feasibility', 'fixture', 'explicit', 'faults'}.issubset(suites):
         raise ValueError('candidate requires distinct fresh feasibility/fixture/smoke/smoke/explicit/faults runs')
     return runs

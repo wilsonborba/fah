@@ -803,6 +803,8 @@ def topology_behaviors():
         raw('device_configuration',slot=hubslot,value=hub['configuration'][5])
         hubdesc=control(hubslot,0xa0,6,0x2900,0,9)
         raw('hub_configure',slot=hubslot,root_port=rootport,ports=hubdesc[2])
+        context=raw('slot_context',slot=hubslot)['words']
+        assert context[0]&(1<<26) and context[1]>>24==hubdesc[2],context
         control(hubslot,0x23,3,8,1,0) # Explicit downstream PORT_POWER.
         control(hubslot,0x23,3,4,1,0) # Explicit downstream PORT_RESET.
         deadline=time.monotonic()+3

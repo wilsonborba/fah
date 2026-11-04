@@ -225,6 +225,16 @@ impl LocalController {
                 ))?;
                 Ok(json!({"slot":slot,"route":route,"managed_state":"unknown"}))
             }
+            Op::SlotContext { slot } => {
+                let host = self
+                    .host
+                    .as_ref()
+                    .ok_or_else(|| OperationError::validation("host unavailable"))?;
+                let words = host
+                    .slot_context_words(slot)
+                    .map_err(|e| OperationError::validation(format!("slot context: {e:?}")))?;
+                Ok(json!({"slot":slot,"words":words}))
+            }
             Op::HubConfigure {
                 slot,
                 root_port,
