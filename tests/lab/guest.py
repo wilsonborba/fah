@@ -8,6 +8,7 @@ import pathlib
 import struct
 import subprocess
 import sys
+import time
 import traceback
 
 BDF = '0000:00:02.0'
@@ -621,10 +622,127 @@ def faults():
     restore()
 
 
+def m8_behaviors():
+    cli=Cli()
+    def raw(action,**args):return cli.command({'op':'raw','request':dict(action=action,**args)})
+    def case(name,**values):report('m8_case',name=name,verified=True,**values)
+    def alloc(length):return raw('dma_alloc',bytes=length)['handle']
+    def terminal(tokens,timeout=5):
+        token=tokens[-1]
+        address=placements[token['sequence']]
+        deadline=time.monotonic()+timeout
+        while time.monotonic()<deadline:
+            raw('drain',timeout_ms=1000)
+            events=raw('events',since=0,limit=4096)['events']
+            for _,words in events:
+                if (words[3]>>10)&63==32 and words[0]|(words[1]<<32)==address:
+                    assert words[2]>>24 in (1,13),words
+                    return words
+            time.sleep(.005)
+        raise AssertionError('raw terminal event deadline')
+    placements={}
+    def scatter(slot,endpoint,handle,offset,length,packet):
+        before=raw('events',since=0,limit=4096)['next']
+        value=raw('scatter_transfer',slot=slot,endpoint=endpoint,segments=[dict(handle=handle,offset=offset,length=length)],max_packet=packet,input=bool(endpoint&128))
+        # Capture the last published address from the raw event itself; a terminal
+        # event is required, not merely a successful enqueue response.
+        deadline=time.monotonic()+5
+        while time.monotonic()<deadline:
+            raw('drain',timeout_ms=1000)
+            events=raw('events',since=before,limit=4096)['events']
+            matches=[words for _,words in events if (words[3]>>10)&63==32 and words[0]|(words[1]<<32)==value['trb_iovas'][-1]]
+            if matches:
+                words=matches[-1];assert words[2]>>24 in(1,13),words
+                case('scatter_event',trbs=len(value['publish_tokens']),words=words)
+                return value,words
+            time.sleep(.005)
+        raise AssertionError('scatter terminal event deadline')
+    try:
+        cli.command({'op':'open','target':BDF});cli.command({'op':'init'})
+        cap=raw('inspect');assert cap['mapped_bytes']>=4096 and cap['protocols'],cap
+        case('capabilities',capabilities=cap)
+        raw('barrier');assert raw('timing')['physical_timing_guaranteed']is False
+        large=alloc(196608)
+        raw('dma_write',handle=large,offset=65530,bytes=list(range(20)))
+        assert raw('dma_read',handle=large,offset=65530,length=20)['bytes']==list(range(20))
+        plan=raw('normal_build',iova=0x1ff00,length=512,max_packet=512,input=True)['trbs']
+        assert [trb[2]&0x1ffff for trb in plan]==[256,256]
+        case('dma_large',split=plan)
+        ports=cli.command({'op':'ports'})
+        storage=None
+        for port in ports:
+            if not port['connected']:continue
+            value=cli.command({'op':'enumerate','port':port['id'],'configure':True})
+            endpoints=next(step['result']for step in value['steps']if step['operation']=='endpoints')
+            if fixture_role(endpoints)=='storage':storage=(value['device'],endpoints)
+        assert storage
+        device,endpoints=storage;slot=device['slot']
+        incoming=next(ep for ep in endpoints if ep['direction']=='in')
+        outgoing=next(ep for ep in endpoints if ep['direction']=='out')
+        # Real131072-byte READ10 through three chained TRBs, crossing two boundaries.
+        tag=0x4d38
+        cbw=b'USBC'+struct.pack('<II',tag,131072)+bytes([128,0,10])+bytes([0x28,0,0,0,0,0,0,1,0,0])+bytes(6)
+        command=alloc(31);raw('dma_write',handle=command,offset=0,bytes=list(cbw))
+        scatter(slot,outgoing['address'],command,0,31,outgoing['max_packet_size'])
+        data,completion=scatter(slot,incoming['address'],large,65280,131072,incoming['max_packet_size'])
+        assert len(data['publish_tokens'])==3 and completion[2]&0xffffff==0
+        assert raw('dma_read',handle=large,offset=65280,length=512)['bytes']==list(range(256))*2
+        status=alloc(13);scatter(slot,incoming['address'],status,0,13,incoming['max_packet_size'])
+        csw=bytes(raw('dma_read',handle=status,offset=0,length=13)['bytes'])
+        validate_csw(csw,tag,131072,131072)
+        assert raw('dma_unmap',handle=command)['released']
+        assert raw('dma_unmap',handle=large)['released']
+        assert raw('dma_unmap',handle=status)['released']
+        case('scatter_read10',trbs=3,bytes=131072)
+        tur=b'USBC'+struct.pack('<II',tag+1,0)+bytes([0,0,6])+bytes(16)
+        tur_command=alloc(31);raw('dma_write',handle=tur_command,offset=0,bytes=list(tur))
+        scatter(slot,outgoing['address'],tur_command,0,31,outgoing['max_packet_size'])
+        bei_buffer=alloc(13);iova=raw('dma_inspect',handle=bei_buffer)['iova']
+        words=raw('normal_build',iova=iova,length=13,max_packet=incoming['max_packet_size'],input=True)['trbs'][0]
+        words[3]|=1<<9
+        since=raw('events',since=0,limit=4096)['next']
+        submitted=raw('transfer',slot=slot,endpoint=incoming['address'],trbs=[words])
+        deadline=time.monotonic()+5
+        while time.monotonic()<deadline:
+            raw('drain',timeout_ms=1000)
+            events=raw('events',since=since,limit=4096)['events']
+            if any((w[3]>>10)&63==32 and w[0]|(w[1]<<32)==submitted['trb_iovas'][-1] and w[2]>>24==1 for _,w in events):break
+            time.sleep(.005)
+        else:raise AssertionError('BEI completion not observable by explicit drain')
+        validate_csw(bytes(raw('dma_read',handle=bei_buffer,offset=0,length=13)['bytes']),tag+1,0,0)
+        case('bei_drain',words=words)
+        # Literal Noop bypasses the typed TRB enum, using independent operations.
+        built=raw('command_build',command='noop')['words'];assert built==[0,0,0,23<<10]
+        staged=raw('compose',words=built)['staged']
+        placed=raw('place',staged=staged,ring={'kind':'command'})
+        raw('publish',token=placed['publish_token']);raw('doorbell',slot=0,endpoint=0)
+        raw('drain',timeout_ms=1000)
+        deadline=time.monotonic()+3
+        while time.monotonic()<deadline:
+            events=raw('events',since=0,limit=4096)['events']
+            if any((w[3]>>10)&63==33 and w[0]|(w[1]<<32)==placed['trb_iova'] and w[2]>>24==1 for _,w in events):break
+            raw('drain',timeout_ms=1000)
+        else:raise AssertionError('literal Noop completion missing')
+        case('literal_noop',words=built)
+        retained=alloc(32)
+        assert raw('dma_unmap',handle=retained)['retained_until_close']
+        assert raw('reconcile')['managed_state']=='unknown'
+        case('unknown_retention')
+        cli.command({'op':'close'})
+        cli.command({'op':'open','target':BDF});cli.command({'op':'init'})
+        rejected=cli.raw({'op':'raw','request':{'action':'dma_read','handle':retained,'offset':0,'length':1}})
+        assert rejected['outcome']['status']=='failed'
+        case('session_handles')
+        cli.command({'op':'close'});assert cli.command({'op':'state'})['resources']['retained_allocations']==0
+    finally:cli.quit()
+
+
 def main():
     report('start', suite=sys.argv[1], run_id=pathlib.Path('/run-id').read_text())
     metadata()
-    if sys.argv[1]=='faults':
+    if sys.argv[1]=='m8':
+        m8_behaviors()
+    elif sys.argv[1]=='faults':
         faults()
     elif sys.argv[1]=='explicit':
         explicit_behaviors()
