@@ -96,10 +96,10 @@ index 71b939e..4ab690c 100644
 -    }
 -}
 diff --git a/usb-host/src/backend/kmod/mod.rs b/usb-host/src/backend/kmod/mod.rs
-index e17466d..7415136 100644
+index e17466d..e5c957d 100644
 --- a/usb-host/src/backend/kmod/mod.rs
 +++ b/usb-host/src/backend/kmod/mod.rs
-@@ -50,3 +50,178 @@ pub struct DeviceAddressInfo {
+@@ -50,3 +50,197 @@ pub struct DeviceAddressInfo {
      pub port_id: u8,
      pub infos: BTreeMap<Id<Hub>, HubInfo>,
  }
@@ -132,10 +132,11 @@ index e17466d..7415136 100644
 +    }
 +
 +    pub fn iso_schedule(&mut self,slot:u8,address:u8,asap:bool,frame:u16)->Result<()> {self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.iso_schedule(address,asap,frame)}
++    pub fn raw_event_tail(&self)->u64 {self.core.raw_events.lock().back().map_or(0,|(seq,_)|*seq)}
++    pub fn raw_retained_events(&self)->alloc::vec::Vec<(u64,[u32;4])> {self.core.raw_events.lock().iter().copied().collect()}
 +    pub fn raw_events(&self,since:u64,limit:usize)->Result<alloc::vec::Vec<(u64,[u32;4])>> {
 +        let log=self.core.raw_events.lock();
-+        if log.front().is_some_and(|(seq,_)|since.saturating_add(1)<*seq) {return Err(USBError::Other(anyhow!("event cursor expired")));}
-+        Ok(log.iter().filter(|(seq,_)|*seq>since).take(limit.min(4096)).copied().collect())
++        event_window(&log,since,limit)
 +    }
 +    pub fn raw_place(&mut self,slot:u8,endpoint:u8,words:[u32;4])->Result<(usize,bool,u64)> {
 +        if slot==0 {Ok(self.core.cmd.raw_place(words))} else {self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.raw_place(endpoint,words)}
@@ -278,6 +279,24 @@ index e17466d..7415136 100644
 +}
 +
 +pub use xhci::cmd::CommandFailure;
++
++fn event_window(log:&alloc::collections::VecDeque<(u64,[u32;4])>,since:u64,limit:usize)->Result<alloc::vec::Vec<(u64,[u32;4])>> {
++    if log.front().is_some_and(|(seq,_)|since.saturating_add(1)<*seq){return Err(USBError::Other(anyhow!("event cursor expired")));}
++    Ok(log.iter().filter(|(seq,_)|*seq>since).take(limit.min(4096)).copied().collect())
++}
++#[cfg(test)]
++mod raw_cursor_tests {
++    use super::*;
++    #[test]
++    fn cursor_advances_beyond_first_page_and_detects_rollover(){
++        let mut log=alloc::collections::VecDeque::new();
++        for seq in 1..=5000 {log.push_back((seq,[seq as u32,0,0,0]));}
++        let first=event_window(&log,0,4096).unwrap();assert_eq!(first.len(),4096);
++        let second=event_window(&log,first.last().unwrap().0,4096).unwrap();assert_eq!(second.last().unwrap().0,5000);
++        log.pop_front();assert!(event_window(&log,0,4096).is_err());
++        assert_eq!(event_window(&log,4999,4096).unwrap()[0].0,5000);
++    }
++}
 diff --git a/usb-host/src/backend/kmod/transfer.rs b/usb-host/src/backend/kmod/transfer.rs
 index 7efe34d..9354d97 100644
 --- a/usb-host/src/backend/kmod/transfer.rs

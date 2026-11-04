@@ -409,12 +409,7 @@ impl LocalController {
                 let mut proven = dependencies.is_empty() && !self.raw.unknown_references;
                 if !dependencies.is_empty() && !self.raw.unknown_references {
                     self.execute_raw(session, Op::Drain { timeout_ms: 1000 })?;
-                    let events = self
-                        .host
-                        .as_ref()
-                        .unwrap()
-                        .raw_events(0, 4096)
-                        .map_err(usb_error)?;
+                    let events = self.host.as_ref().unwrap().raw_retained_events();
                     proven = dependencies.iter().all(|address| {
                         events.iter().any(|(_, words)| {
                             ((words[3] >> 10) & 63) == 32
@@ -425,7 +420,7 @@ impl LocalController {
                     });
                 }
                 if proven && !self.raw.unknown_references {
-                    // No literal operation has ever been visible to this controller.
+                    // Only known private TD references remain, all with terminal proof.
                     unsafe { adapter.reclaim_lease_after_quiescence(lease) }.map_err(os_error)?;
                     self.raw.leases.remove(&handle.sequence);
                     self.raw.dependencies.remove(&handle.sequence);
@@ -569,6 +564,11 @@ impl LocalController {
                 Ok(json!({"acknowledged":true,"events_retained":true}))
             }
             Op::Command { words, timeout_ms } => {
+                let mut cursor = self
+                    .host
+                    .as_ref()
+                    .ok_or_else(|| OperationError::validation("host unavailable"))?
+                    .raw_event_tail();
                 let staged = self.execute_raw(session, Op::Compose { words })?;
                 let staged: Handle = serde_json::from_value(staged["staged"].clone()).unwrap();
                 let placed = self.execute_raw(
@@ -596,7 +596,7 @@ impl LocalController {
                         .host
                         .as_ref()
                         .unwrap()
-                        .raw_events(0, 4096)
+                        .raw_events(cursor, 4096)
                         .map_err(usb_error)?;
                     if let Some((_, event)) = events.iter().find(|(_, e)| {
                         (e[3] >> 10) & 63 == 33
@@ -607,6 +607,7 @@ impl LocalController {
                             json!({"completion":event,"publish_token":token,"managed_state":"unknown"}),
                         );
                     }
+                    cursor = events.last().map_or(cursor, |(sequence, _)| *sequence);
                     if Instant::now() >= deadline {
                         return Ok(
                             json!({"pending":true,"publish_token":token,"managed_state":"unknown"}),
