@@ -193,3 +193,49 @@ fn literal_effect_classification_does_not_narrow_unknown_or_vendor_words() {
     setup[0] |= 0x40;
     assert_eq!(effect(&transfer(setup)), Effect::Global);
 }
+
+#[test]
+fn physical_ring_identity_and_owner_link_are_not_caller_aliases() {
+    let a = Ring::Endpoint {
+        slot: 1,
+        endpoint: 0,
+    }
+    .owner_key()
+    .unwrap();
+    assert_eq!(
+        a,
+        Ring::Endpoint {
+            slot: 1,
+            endpoint: 128
+        }
+        .owner_key()
+        .unwrap()
+    );
+    assert!(
+        Ring::Endpoint {
+            slot: 1,
+            endpoint: 0x91
+        }
+        .owner_key()
+        .is_err()
+    );
+    assert!(
+        Ring::Endpoint {
+            slot: 0,
+            endpoint: 1
+        }
+        .owner_key()
+        .is_err()
+    );
+    assert!(
+        Ring::Stream {
+            slot: 1,
+            endpoint: 129,
+            stream: 0
+        }
+        .owner_key()
+        .is_err()
+    );
+    assert!(validate_literal_slot([0, 0, 0, 6 << 10]).is_err());
+    assert!(validate_literal_slot([u32::MAX; 4]).is_ok());
+}

@@ -22,6 +22,51 @@ pub enum Ring {
     Endpoint { slot: u8, endpoint: u8 },
     Stream { slot: u8, endpoint: u8, stream: u16 },
 }
+impl Ring {
+    pub fn owner_key(self) -> Result<Self, OperationError> {
+        let endpoint = |slot: u8, address: u8| -> Result<u8, OperationError> {
+            if slot == 0 || address & 0x70 != 0 {
+                return Err(OperationError::validation("invalid endpoint ring identity"));
+            }
+            Ok(if address & 15 == 0 { 0 } else { address })
+        };
+        match self {
+            Self::Command => Ok(self),
+            Self::Endpoint {
+                slot,
+                endpoint: address,
+            } => Ok(Self::Endpoint {
+                slot,
+                endpoint: endpoint(slot, address)?,
+            }),
+            Self::Stream {
+                slot,
+                endpoint: address,
+                stream,
+            } => {
+                let ep = endpoint(slot, address)?;
+                if stream == 0 || ep & 15 == 0 {
+                    return Err(OperationError::validation(
+                        "stream requires nonzero Stream ID and non-control endpoint",
+                    ));
+                }
+                Ok(Self::Stream {
+                    slot,
+                    endpoint: ep,
+                    stream,
+                })
+            }
+        }
+    }
+}
+pub fn validate_literal_slot(words: [u32; 4]) -> Result<(), OperationError> {
+    if (words[3] >> 10) & 63 == 6 {
+        return Err(OperationError::validation(
+            "Link TRBs are managed by the ring owner",
+        ));
+    }
+    Ok(())
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RawOperation {

@@ -439,12 +439,14 @@ impl LocalController {
                 Ok(json!({"staged":handle}))
             }
             Op::Place { staged, ring } => {
+                let ring = ring.owner_key()?;
                 let id = validate_handle(staged, session)?;
                 let words = *self
                     .raw
                     .staged
                     .get(&id)
                     .ok_or_else(|| OperationError::validation("unknown staged TRB"))?;
+                crate::domain::models::raw::validate_literal_slot(words)?;
                 if !self.pending.is_empty() {
                     return Err(OperationError::validation(
                         "resolve managed outstanding requests before reserving a raw ring",
