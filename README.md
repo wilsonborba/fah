@@ -397,13 +397,13 @@ validation. Remaining gates are [isolated target #32](https://github.com/wilsonb
 | [timing_guarantees](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/models/control_plan.rs) | — | unsupported | static_review | ordering/deadlines are software controls; physical timing remains unmeasured |
 | [physical_intel_validation](https://github.com/wilsonborba/fah/blob/feature/main/lib/presentation/cli/handlers.rs) | — | planned | unresolved | see #32 and #33; notebook controller takeover remains blocked |
 | [ipad_a5_case_study](https://github.com/wilsonborba/fah/blob/feature/main/lib/presentation/cli/handlers.rs) | — | planned | unresolved | see #34; emulated USB success establishes no boot/exploitation capability |
-| [isochronous](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested, emulated_guest_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
-| [bulk_streams](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested, emulated_guest_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
-| [hub_topology](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested, emulated_guest_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
-| [scatter_gather](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested, emulated_guest_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
-| [protocol_inspection](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested, emulated_guest_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
-| [explicit_event_drain](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested, emulated_guest_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
-| [ordering_controls](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested, emulated_guest_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
+| [isochronous](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested, emulated_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
+| [bulk_streams](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested, emulated_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
+| [hub_topology](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested, emulated_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
+| [scatter_gather](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested, emulated_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
+| [protocol_inspection](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested, emulated_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
+| [explicit_event_drain](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested, emulated_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
+| [ordering_controls](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested, emulated_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
 <!-- FAH_CAPABILITIES_END -->
 
 ## References and license
@@ -509,6 +509,9 @@ direct ring/MMIO/doorbell mutations invalidate the global managed view. Readback
 never clears unknown global effects. Raw access stays available; coordinated
 close/reopen reconstructs a clean owner. Event correlation and buffer quiescence
 remain independent of managed-view reconciliation.
+
+The owner reserves Link entries and canonicalizes EP0 direction aliases to one
+physical ring identity. Caller fields in ordinary literal TRBs are preserved.
 
 Resource limits are explicit: 128 literal reservations per ring until close,
 4096 staged TRBs, 65536 retained raw events, 256MiB per raw allocation, 4096 primary

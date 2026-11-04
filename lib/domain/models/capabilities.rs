@@ -652,7 +652,7 @@ pub fn registry() -> Vec<Capability> {
             "explicit barriers, doorbells, MFINDEX and interrupt moderation",
         ),
     ] {
-        rows.push(Capability{operation,commands:&["raw"],availability:Availability::Implemented,boundary:Boundary::DeviceDependent,evidence:&["compiled","fake_tested","emulated_guest_tested"],precondition:"initialized emulated owner and operation-specific controller/device support",effect,specification:SPECIFICATION,implementation:"lib/dal/local/controller_raw.rs",validation:&["tests/raw_contract.rs","tests/events.rs","tests/lab/guest.py"],runs:&["m8 and topology: release evidence recorded in #78"],limits:"see release evidence for guest coverage; physical and fixture-dependent branches remain unproven"});
+        rows.push(Capability{operation,commands:&["raw"],availability:Availability::Implemented,boundary:Boundary::DeviceDependent,evidence:&["compiled","fake_tested","emulated_tested"],precondition:"initialized emulated owner and operation-specific controller/device support",effect,specification:SPECIFICATION,implementation:"lib/dal/local/controller_raw.rs",validation:&["tests/raw_contract.rs","tests/events.rs","tests/lab/guest.py"],runs:&["m8","topology"],limits:"see release evidence for guest coverage; physical and fixture-dependent branches remain unproven"});
     }
     rows
 }
