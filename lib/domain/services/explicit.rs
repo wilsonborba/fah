@@ -28,6 +28,11 @@ impl<B: ExplicitBackend> UsbSession<B> {
         if matches!(
             &request,
             Op::RegisterWrite { .. }
+                | Op::SlotEnable
+                | Op::AddressRoute { .. }
+                | Op::HubConfigure { .. }
+                | Op::DeviceConfiguration { .. }
+                | Op::EndpointConfigure { .. }
                 | Op::Place { .. }
                 | Op::Publish { .. }
                 | Op::Doorbell { .. }

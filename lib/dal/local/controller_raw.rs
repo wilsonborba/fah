@@ -76,6 +76,90 @@ impl LocalController {
         request: Op,
     ) -> Result<Value, OperationError> {
         match request {
+            Op::SlotEnable => {
+                let host = self
+                    .host
+                    .as_mut()
+                    .ok_or_else(|| OperationError::validation("host unavailable"))?;
+                let slot = device_future(host.enable_slot())?;
+                Ok(json!({"slot":slot,"managed_state":"unknown"}))
+            }
+            Op::AddressRoute {
+                slot,
+                root_port,
+                speed,
+                route,
+                parent_slot,
+                parent_port,
+                multi_tt,
+                tt_think,
+                bsr,
+            } => {
+                let host = self
+                    .host
+                    .as_mut()
+                    .ok_or_else(|| OperationError::validation("host unavailable"))?;
+                device_future(host.address_route(
+                    slot,
+                    root_port,
+                    speed,
+                    route,
+                    parent_slot,
+                    parent_port,
+                    multi_tt,
+                    tt_think,
+                    bsr,
+                ))?;
+                Ok(json!({"slot":slot,"route":route,"managed_state":"unknown"}))
+            }
+            Op::HubConfigure {
+                slot,
+                root_port,
+                ports,
+                multi_tt,
+                tt_think_ns,
+            } => {
+                let host = self
+                    .host
+                    .as_mut()
+                    .ok_or_else(|| OperationError::validation("host unavailable"))?;
+                device_future(host.configure_hub(slot, root_port, ports, multi_tt, tt_think_ns))?;
+                Ok(json!({"slot":slot,"ports":ports,"managed_state":"unknown"}))
+            }
+            Op::DeviceDescriptor {
+                slot,
+                kind,
+                index,
+                language,
+                length,
+            } => {
+                use crate::domain::services::usb::ConfigurationBackend;
+                let bytes = self.descriptor(
+                    slot,
+                    crate::domain::models::descriptors::DescriptorRequest {
+                        kind,
+                        index,
+                        language,
+                        length,
+                    },
+                )?;
+                Ok(json!({"bytes":bytes}))
+            }
+            Op::DeviceConfiguration { slot, value } => {
+                use crate::domain::services::usb::ConfigurationBackend;
+                self.set_configuration(slot, value)?;
+                Ok(json!({"value":value,"managed_state":"unknown"}))
+            }
+            Op::EndpointConfigure {
+                slot,
+                interface,
+                alternate,
+                configuration,
+            } => {
+                use crate::domain::services::usb::ConfigurationBackend;
+                let endpoints = self.setup_endpoints(slot, interface, alternate, &configuration)?;
+                Ok(json!({"endpoints":endpoints,"managed_state":"unknown"}))
+            }
             Op::IsoSchedule {
                 slot,
                 endpoint,
