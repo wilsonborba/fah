@@ -97,3 +97,19 @@ fn idle_shutdown_is_woken_without_busy_polling() {
     let pump = EventPump::start(drain, event).unwrap();
     assert_eq!(pump.stop().unwrap().seen.load(Ordering::SeqCst), 3);
 }
+
+#[test]
+fn explicit_drain_observes_bei_without_an_irq_and_acknowledges_empty() {
+    let (drain, event) = fixture();
+    let seen = drain.seen.clone();
+    let pending = drain.pending.clone();
+    let pump = EventPump::start(drain, event).unwrap();
+    pump.drain_now(Duration::from_secs(2)).unwrap();
+    assert_eq!(seen.load(Ordering::SeqCst), 3);
+    pending.fetch_add(7, Ordering::SeqCst); // No IRQ eventfd write.
+    pump.drain_now(Duration::from_secs(2)).unwrap();
+    assert_eq!(seen.load(Ordering::SeqCst), 10);
+    pump.drain_now(Duration::from_secs(2)).unwrap();
+    assert_eq!(seen.load(Ordering::SeqCst), 10);
+    pump.stop().unwrap();
+}
