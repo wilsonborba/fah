@@ -20,3 +20,5 @@ def require_clean_release(root, command):
     if command('git', '-C', str(root), 'status', '--porcelain'):
         raise ValueError(f'release operation requires clean {expected}; commit changes first')
     return version
+
+TOPOLOGY_CASES = {'hub_route', 'isochronous', 'stream_inquiry'}

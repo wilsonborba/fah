@@ -427,11 +427,11 @@ preserved upstream texts and reviewed omissions; `--write-notices` regenerates
 notice, source snapshot, patches, checksums and dependency provenance. See
 [third-party notices](THIRD_PARTY_NOTICES.md) and [modifications](NOTICE).
 
-On the clean release, after rebuilding/preparing and passing the six required fresh
+On the clean release, after rebuilding/preparing and passing the eight required fresh
 runs, package their exact generated directories:
 
 ```text
-python3 scripts/release.py candidate --evidence <feasibility-run> --evidence <fixture-run> --evidence <smoke-run-1> --evidence <smoke-run-2> --evidence <explicit-run> --evidence <faults-run>
+python3 scripts/release.py candidate --evidence <feasibility-run> --evidence <fixture-run> --evidence <smoke-run-1> --evidence <smoke-run-2> --evidence <explicit-run> --evidence <faults-run> --evidence <m8-run> --evidence <topology-run>
 ```
 
 Each evidence argument is an absolute `docs/evidence/<run>` path. Packaging
@@ -492,7 +492,8 @@ controls. Linux scheduling and physical packet timing remain unverified.
 
 For downstream devices, `slot_enable`, `address_route` and `hub_configure` expose
 route, speed and TT fields. `device_descriptor`, `device_configuration` and
-`endpoint_configure` prepare devices explicitly. `iso_schedule` selects ASAP or
+`endpoint_configure` prepare devices explicitly. `slot_context` reads the output
+Slot Context, including the Hub flag and port count, without mutating it. `iso_schedule` selects ASAP or
 Frame ID. Ordinary `submit` accepts `isochronous`; `iso_packets` accepts an explicit
 packet-length array. `stream_configure` checks controller and device stream limits,
 creates primary arrays and retains a separate ring for each Stream ID. Select
@@ -510,7 +511,8 @@ stream entries, 64KiB ordinary single-buffer requests and 128 iso packets per
 convenience request. Literal data/ring construction remains available through DMA
 and MMIO. These are implementation budgets, not claimed xHCI hardware limits.
 
-New capabilities are compiled and tested with synthetic resources. Release evidence
-records which paths passed in the emulated guest. Physical Intel behavior and the
-separate case study remain in M7. A stream fixture is required before claiming
-end-to-end stream I/O; capability detection and synthetic tests do not prove it.
+Release suites exercise the emulated controller with a downstream USB audio device,
+a hub, and a SuperSpeed UAS device. They check isochronous completion, routed
+descriptors, stream INQUIRY data and status, and large chained transfers. Independent
+xHCI traces accompany guest assertions. Physical Intel behavior and the separate
+case study remain in M7; emulated success does not establish physical timing.
