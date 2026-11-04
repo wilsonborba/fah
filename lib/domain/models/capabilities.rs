@@ -279,7 +279,7 @@ pub fn registry() -> Vec<Capability> {
             implementation: "lib/domain/services/usb.rs",
             validation: &["tests/preparation.rs"],
             runs: &["smoke"],
-            limits: "control/bulk/interrupt profile; hubs, streams and isochronous I/O not exposed",
+            limits: "root-device enumeration convenience; raw topology, streams and isochronous operations use the explicit surface",
             availability: Availability::Implemented,
             boundary: Boundary::LibraryProfile,
             evidence: &["compiled", "fake_tested", "emulated_tested"],
@@ -652,7 +652,7 @@ pub fn registry() -> Vec<Capability> {
             "explicit barriers, doorbells, MFINDEX and interrupt moderation",
         ),
     ] {
-        rows.push(Capability{operation,commands:&["raw"],availability:Availability::Implemented,boundary:Boundary::DeviceDependent,evidence:&["compiled","fake_tested"],precondition:"initialized emulated owner and operation-specific controller/device support",effect,specification:SPECIFICATION,implementation:"lib/dal/local/controller_raw.rs",validation:&["tests/raw_contract.rs","tests/events.rs"],runs:&[],limits:"see release evidence for guest coverage; physical and fixture-dependent branches remain unproven"});
+        rows.push(Capability{operation,commands:&["raw"],availability:Availability::Implemented,boundary:Boundary::DeviceDependent,evidence:&["compiled","fake_tested","emulated_guest_tested"],precondition:"initialized emulated owner and operation-specific controller/device support",effect,specification:SPECIFICATION,implementation:"lib/dal/local/controller_raw.rs",validation:&["tests/raw_contract.rs","tests/events.rs","tests/lab/guest.py"],runs:&["m8 and topology: release evidence recorded in #78"],limits:"see release evidence for guest coverage; physical and fixture-dependent branches remain unproven"});
     }
     rows
 }
@@ -680,6 +680,18 @@ pub fn report() -> CapabilityReport {
         physical_validated: false,
         capabilities: registry(),
         runs: vec![
+            EvidenceRun {
+                suite: "m8",
+                commit: "be3388e",
+                artifact: "1793794879138724775-m8",
+                review: "https://github.com/wilsonborba/fah/issues/78",
+            },
+            EvidenceRun {
+                suite: "topology",
+                commit: "68f56db4bff23d968116f6611cf8112a6b69cfdb",
+                artifact: "1793794328471177869-topology (exact source SHA in manifest)",
+                review: "https://github.com/wilsonborba/fah/issues/82",
+            },
             EvidenceRun {
                 suite: "smoke",
                 commit: "21252e1",
