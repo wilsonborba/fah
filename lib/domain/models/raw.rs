@@ -25,6 +25,12 @@ pub enum Ring {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RawOperation {
+    Barrier,
+    Timing,
+    Moderation {
+        interval: u16,
+        counter: u16,
+    },
     ScatterTransfer {
         slot: u8,
         endpoint: u8,
@@ -167,7 +173,7 @@ pub enum RawOperation {
         slot: Option<u8>,
     },
     CommandBuild {
-        command: u8,
+        command: CommandCode,
         #[serde(default)]
         parameter: u64,
         #[serde(default)]
@@ -359,7 +365,113 @@ pub fn completion_class(event_type: u8, code: u8) -> CompletionClass {
         (32 | 33, 1) => CompletionClass::Success,
         (32, 13) => CompletionClass::ShortPacket,
         (32, 26..=28) => CompletionClass::Stopped,
-        (32 | 33, 2..=12 | 14..=25 | 29..=36) => CompletionClass::Error,
+        (33, 4 | 5 | 7 | 8 | 9 | 11 | 17 | 19 | 22 | 24 | 25 | 29 | 33 | 35) => {
+            CompletionClass::Error
+        }
+        (32, 2 | 3 | 4 | 5 | 6 | 7 | 10 | 12 | 14 | 15 | 18 | 20 | 23 | 31 | 32 | 33 | 34 | 36) => {
+            CompletionClass::Error
+        }
         _ => CompletionClass::Unknown,
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandName {
+    EnableSlot,
+    DisableSlot,
+    AddressDevice,
+    ConfigureEndpoint,
+    EvaluateContext,
+    ResetEndpoint,
+    StopEndpoint,
+    SetTrDequeue,
+    ResetDevice,
+    ForceEvent,
+    NegotiateBandwidth,
+    SetLatencyTolerance,
+    GetPortBandwidth,
+    ForceHeader,
+    Noop,
+    GetExtendedProperty,
+    SetExtendedProperty,
+}
+impl CommandName {
+    pub fn code(self) -> u8 {
+        match self {
+            Self::EnableSlot => 9,
+            Self::DisableSlot => 10,
+            Self::AddressDevice => 11,
+            Self::ConfigureEndpoint => 12,
+            Self::EvaluateContext => 13,
+            Self::ResetEndpoint => 14,
+            Self::StopEndpoint => 15,
+            Self::SetTrDequeue => 16,
+            Self::ResetDevice => 17,
+            Self::ForceEvent => 18,
+            Self::NegotiateBandwidth => 19,
+            Self::SetLatencyTolerance => 20,
+            Self::GetPortBandwidth => 21,
+            Self::ForceHeader => 22,
+            Self::Noop => 23,
+            Self::GetExtendedProperty => 24,
+            Self::SetExtendedProperty => 25,
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CommandCode {
+    Literal(u8),
+    Named(CommandName),
+}
+impl CommandCode {
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Literal(code) => code,
+            Self::Named(name) => name.code(),
+        }
+    }
+}
+
+pub fn completion_name(code: u8) -> &'static str {
+    match code {
+        0 => "invalid",
+        1 => "success",
+        2 => "data_buffer_error",
+        3 => "babble_detected",
+        4 => "usb_transaction_error",
+        5 => "trb_error",
+        6 => "stall",
+        7 => "resource_error",
+        8 => "bandwidth_error",
+        9 => "no_slots",
+        10 => "invalid_stream_type",
+        11 => "slot_not_enabled",
+        12 => "endpoint_not_enabled",
+        13 => "short_packet",
+        14 => "ring_underrun",
+        15 => "ring_overrun",
+        16 => "vf_event_ring_full",
+        17 => "parameter_error",
+        18 => "bandwidth_overrun",
+        19 => "context_state_error",
+        20 => "no_ping_response",
+        21 => "event_ring_full",
+        22 => "incompatible_device",
+        23 => "missed_service",
+        24 => "command_ring_stopped",
+        25 => "command_aborted",
+        26 => "stopped",
+        27 => "stopped_length_invalid",
+        28 => "stopped_short_packet",
+        29 => "max_exit_latency_too_large",
+        31 => "isoch_buffer_overrun",
+        32 => "event_lost",
+        33 => "undefined_error",
+        34 => "invalid_stream_id",
+        35 => "secondary_bandwidth_error",
+        36 => "split_transaction_error",
+        _ => "unknown",
     }
 }

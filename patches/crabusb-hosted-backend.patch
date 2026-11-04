@@ -1047,7 +1047,7 @@ index 5c11453..af70085 100644
 + }
 +}
 diff --git a/usb-host/src/backend/kmod/xhci/event.rs b/usb-host/src/backend/kmod/xhci/event.rs
-index 27eeae2..6464718 100644
+index 27eeae2..c24c741 100644
 --- a/usb-host/src/backend/kmod/xhci/event.rs
 +++ b/usb-host/src/backend/kmod/xhci/event.rs
 @@ -2,6 +2,7 @@ use alloc::vec::Vec;
@@ -1121,7 +1121,7 @@ index 27eeae2..6464718 100644
      }
  
      fn inc_deque(&mut self) {
-@@ -137,3 +150,74 @@ pub struct EventRingInfo {
+@@ -137,3 +150,84 @@ pub struct EventRingInfo {
      pub erdp: u64,
      pub erstba: u64,
  }
@@ -1149,6 +1149,16 @@ index 27eeae2..6464718 100644
 +    }
 +    impl KernelOp for Memory {fn delay(&self,_:Duration) {}}
 +    pub(crate) static MEMORY:Memory=Memory;
++    #[test]
++    fn literal_placement_preserves_fields_and_defers_ownership() {
++        let kernel=Kernel::new(u64::MAX,&MEMORY);
++        let mut ring=super::super::ring::SendRing::<()>::new(DmaDirection::Bidirectional,&kernel).unwrap();
++        let words=[0x12345678,0x87654321,0xfedcba98,(63<<10)|0x80000020];
++        let (index,cycle,address)=ring.raw_place(words);
++        let read=||{let mut raw=[0;4];for i in 0..4{raw[i]=unsafe{(address as *const u32).add(i).read_volatile()};}raw};
++        let before=read();assert_eq!(&before[..3],&words[..3]);assert_eq!(before[3]&!1,words[3]&!1);assert_ne!(before[3]&1!=0,cycle);
++        ring.raw_publish(index,cycle);let after=read();assert_eq!(&after[..3],&words[..3]);assert_eq!(after[3]&!1,words[3]&!1);assert_eq!(after[3]&1!=0,cycle);
++    }
 +    #[test]
 +    fn unknown_event_advances_before_typed_dispatch() {
 +        let kernel=Kernel::new(u64::MAX,&MEMORY);
