@@ -28,6 +28,8 @@ impl<B: ExplicitBackend> UsbSession<B> {
         if matches!(
             &request,
             Op::RegisterWrite { .. }
+                | Op::DevicePacketSize { .. }
+                | Op::DeviceInterface { .. }
                 | Op::SlotEnable
                 | Op::StreamConfigure { .. }
                 | Op::AddressRoute { .. }

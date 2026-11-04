@@ -25,6 +25,15 @@ pub enum Ring {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RawOperation {
+    DevicePacketSize {
+        slot: u8,
+        size: u16,
+    },
+    DeviceInterface {
+        slot: u8,
+        interface: u8,
+        alternate: u8,
+    },
     Barrier,
     Timing,
     Moderation {
