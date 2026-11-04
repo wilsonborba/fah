@@ -96,10 +96,10 @@ index 71b939e..4ab690c 100644
 -    }
 -}
 diff --git a/usb-host/src/backend/kmod/mod.rs b/usb-host/src/backend/kmod/mod.rs
-index e17466d..da8e51e 100644
+index e17466d..e138d7d 100644
 --- a/usb-host/src/backend/kmod/mod.rs
 +++ b/usb-host/src/backend/kmod/mod.rs
-@@ -50,3 +50,168 @@ pub struct DeviceAddressInfo {
+@@ -50,3 +50,176 @@ pub struct DeviceAddressInfo {
      pub port_id: u8,
      pub infos: BTreeMap<Id<Hub>, HubInfo>,
  }
@@ -110,6 +110,14 @@ index e17466d..da8e51e 100644
 +pub struct ExplicitHost {pub(crate) core:Xhci, devices:BTreeMap<u8,xhci::Device>}
 +#[cfg(feature = "hosted-direct")]
 +impl ExplicitHost {
++    pub async fn configure_streams(&mut self,slot:u8,address:u8,entries:u16)->Result<()> {
++        let max=self.core.reg.read().capability.hccparams1.read_volatile().maximum_primary_stream_array_size();
++        if max==0||entries as u32>(1u32<<(max+1)){return Err(USBError::NotSupported);}
++        self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.configure_streams(address,entries).await
++    }
++    pub fn stream_place(&mut self,slot:u8,address:u8,stream:u16,words:[u32;4])->Result<(usize,bool,u64)>{self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.stream_place(address,stream,words)}
++    pub fn stream_publish(&mut self,slot:u8,address:u8,stream:u16,index:usize,cycle:bool)->Result<()>{self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.stream_publish(address,stream,index,cycle)}
++
 +    pub async fn address_route(&mut self,slot:u8,root_port:u8,speed:u8,route:u32,parent_slot:u8,parent_port:u8,multi_tt:bool,think:u8,bsr:bool)->Result<()> {
 +        if !(1..=5).contains(&speed)||route>0xfffff||think>3||root_port==0||root_port>self.port_count(){return Err(USBError::InvalidParameter);}
 +        let info=DeviceAddressInfo{root_port_id:root_port,parent_hub:None,port_speed:usb_if::Speed::from_xhci_portsc(speed),port_id:root_port,infos:BTreeMap::new()};
@@ -373,21 +381,59 @@ index 900eaad..ab5ca53 100644
          match self {
              ContextData::Context32(ctx) => ctx.out.dma_addr(),
 diff --git a/usb-host/src/backend/kmod/xhci/device.rs b/usb-host/src/backend/kmod/xhci/device.rs
-index a7996fc..73ebdfe 100644
+index a7996fc..eb5ff20 100644
 --- a/usb-host/src/backend/kmod/xhci/device.rs
 +++ b/usb-host/src/backend/kmod/xhci/device.rs
-@@ -39,6 +39,7 @@ use crate::{
+@@ -39,6 +39,10 @@ use crate::{
  };
  
  pub struct Device {
++    stream_arrays:BTreeMap<u8,dma_api::DArray<[u64;2]>>,
++    stream_rings:BTreeMap<(u8,u16),super::ring::SendRing<xhci::ring::trb::event::TransferEvent>>,
++
 +    topology_override:Option<(u32,u8,u8,bool,u8)>,
      id: SlotId,
      ctx: ContextData,
      desc: DeviceDescriptor,
-@@ -55,6 +56,23 @@ pub struct Device {
+@@ -55,6 +59,58 @@ pub struct Device {
  }
  
  impl Device {
++    pub(crate) fn stream_place(&mut self,address:u8,stream:u16,words:[u32;4])->Result<(usize,bool,u64)> {
++        Ok(self.stream_rings.get_mut(&(address,stream)).ok_or(USBError::NotFound)?.raw_place(words))
++    }
++    pub(crate) fn stream_publish(&mut self,address:u8,stream:u16,index:usize,cycle:bool)->Result<()> {
++        self.stream_rings.get_mut(&(address,stream)).ok_or(USBError::NotFound)?.raw_publish(index,cycle);Ok(())
++    }
++    pub(crate) async fn configure_streams(&mut self,address:u8,entries:u16)->Result<()> {
++        if !matches!(self.port_speed,Speed::SuperSpeed|Speed::SuperSpeedPlus)||self.stream_arrays.contains_key(&address)||entries<4||entries>4096||!entries.is_power_of_two(){return Err(USBError::InvalidParameter);}
++        let desc=self.find_ep_desc_in_current_config(address)?;
++        if desc.transfer_type!=EndpointType::Bulk{return Err(USBError::InvalidParameter);}
++        let dci=desc.dci();
++        let mut array=self.kernel.array_zero_with_align::<[u64;2]>(entries as usize,64,dma_api::DmaDirection::Bidirectional).map_err(|_|USBError::NoMemory)?;
++        for stream in 1..entries {
++            let ring=super::ring::SendRing::new(dma_api::DmaDirection::Bidirectional,&self.kernel)?;
++            // Primary Transfer Ring SCT=1, DCS=1; entry zero remains invalid.
++            array.set(stream as usize,[ring.bus_addr().raw()|3,0]);
++            self.stream_rings.insert((address,stream),ring);
++        }
++        let pointer=array.dma_addr().as_u64();
++        self.stream_arrays.insert(address,array); // Retain before possible command publication.
++        self.explicit_stop_endpoint(address).await?;
++        self.ctx.perper_change();
++        self.ctx.with_input(|input|{
++            input.control_mut().set_drop_context_flag(dci as usize);
++            input.control_mut().set_add_context_flag(dci as usize);
++            let ep=input.device_mut().endpoint_mut(dci as usize);
++            ep.set_max_primary_streams((entries.ilog2()-1)as u8);ep.set_linear_stream_array();
++            // xhci0.9.2 setter retains ordinary-ring alignment; arrays here use64B.
++            ep.set_tr_dequeue_pointer(pointer);ep.clear_dequeue_cycle_state();
++        });
++        mb();
++        self.cmd.cmd_request(command::Allowed::ConfigureEndpoint(*command::ConfigureEndpoint::default().set_slot_id(self.id.into()).set_input_context_pointer(self.ctx.input_bus_addr()))).await?;
++        Ok(())
++    }
++
 +    pub(crate) async fn address_route(&mut self,host:&mut Xhci,info:&DeviceAddressInfo,route:u32,parent_slot:u8,parent_port:u8,multi_tt:bool,think:u8,bsr:bool)->Result<()> {
 +        self.topology_override=Some((route,parent_slot,parent_port,multi_tt,think));
 +        self.prepare_explicit(host,info,bsr).await
@@ -408,15 +454,16 @@ index a7996fc..73ebdfe 100644
      pub(crate) async fn new(host: &mut Xhci) -> Result<Self> {
          let slot_id = host.device_slot_assignment().await?;
          debug!("Slot {slot_id} assigned");
-@@ -71,6 +89,7 @@ impl Device {
+@@ -71,6 +127,8 @@ impl Device {
          let desc = unsafe { core::mem::zeroed() };
  
          Ok(Self {
++            stream_arrays:BTreeMap::new(),stream_rings:BTreeMap::new(),
 +            topology_override:None,
              id: slot_id,
              ctx,
              bell,
-@@ -159,30 +178,108 @@ impl Device {
+@@ -159,30 +217,108 @@ impl Device {
          Ok(())
      }
  
@@ -541,7 +588,7 @@ index a7996fc..73ebdfe 100644
          // 直接使用 DeviceSpeed 枚举计算默认 max packet size
          let max_packet_size = parse_default_max_packet_size_from_port_speed(info.port_speed);
  
-@@ -204,9 +301,10 @@ impl Device {
+@@ -204,9 +340,10 @@ impl Device {
              parent_id = parent_hub.parent;
          }
  
@@ -554,7 +601,7 @@ index a7996fc..73ebdfe 100644
          // ctrl dci
          let dci = Dci::CTRL;
          // 1. Allocate an Input Context data structure (6.2.5) and initialize all fields to
-@@ -287,16 +385,11 @@ impl Device {
+@@ -287,16 +424,11 @@ impl Device {
              endpoint_0.set_max_packet_size(max_packet_size);
              // • Max Burst Size = 0.
              endpoint_0.set_max_burst_size(0);
@@ -576,7 +623,7 @@ index a7996fc..73ebdfe 100644
              // • Interval = 0.
              endpoint_0.set_interval(0);
              // • Max Primary Streams (MaxPStreams) = 0.
-@@ -326,14 +419,13 @@ impl Device {
+@@ -326,14 +458,13 @@ impl Device {
  
          mb();
  
@@ -595,7 +642,7 @@ index a7996fc..73ebdfe 100644
              .await?;
  
          debug!("Address slot ok {result:x?}");
-@@ -348,12 +440,10 @@ impl Device {
+@@ -348,12 +479,10 @@ impl Device {
      async fn get_device_descriptor_base(&mut self) -> Result<DeviceDescriptorBase> {
          let mut data = vec![0u8; 8];
  
@@ -612,7 +659,7 @@ index a7996fc..73ebdfe 100644
  
          Ok(desc)
      }
-@@ -528,7 +618,7 @@ impl Device {
+@@ -528,7 +657,7 @@ impl Device {
              input
                  .device_mut()
                  .slot_mut()
@@ -621,7 +668,7 @@ index a7996fc..73ebdfe 100644
          });
          mb();
  
-@@ -765,3 +855,90 @@ impl DeviceOp for Device {
+@@ -765,3 +894,90 @@ impl DeviceOp for Device {
          self.update_hub_inner(params).boxed()
      }
  }

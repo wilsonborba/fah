@@ -13,10 +13,17 @@ pub struct Handle {
 pub enum Ring {
     Command,
     Endpoint { slot: u8, endpoint: u8 },
+    Stream { slot: u8, endpoint: u8, stream: u16 },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RawOperation {
+    StreamConfigure {
+        slot: u8,
+        endpoint: u8,
+        entries: u16,
+        device_max_streams: u8,
+    },
     SlotEnable,
     AddressRoute {
         slot: u8,
@@ -157,6 +164,27 @@ fn event_limit() -> usize {
 }
 fn drain_timeout() -> u64 {
     1000
+}
+pub fn validate_streams(
+    controller_max: u8,
+    device_max: u8,
+    entries: u16,
+) -> Result<(), OperationError> {
+    if controller_max == 0
+        || device_max == 0
+        || controller_max > 15
+        || device_max > 16
+        || entries < 4
+        || !entries.is_power_of_two()
+        || entries > 4096
+        || (entries as u32) > (1u32 << (controller_max + 1))
+        || (entries as u32 - 1) > (1u32 << device_max)
+    {
+        return Err(OperationError::validation(
+            "unsupported controller/device stream array size",
+        ));
+    }
+    Ok(())
 }
 
 /// Normal TRB buffers may not cross a 64KiB address boundary (xHCI6.4.1).

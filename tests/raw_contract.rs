@@ -62,3 +62,16 @@ fn isochronous_requests_have_an_owned_buffer_and_explicit_packet_api() {
         fah::presentation::cli::commands::ShellCommand::Raw { .. }
     ));
 }
+
+#[test]
+fn stream_capabilities_and_device_limits_are_not_invented() {
+    assert!(validate_streams(0, 4, 4).is_err());
+    assert!(validate_streams(4, 0, 4).is_err());
+    assert!(validate_streams(1, 4, 8).is_err());
+    assert!(validate_streams(4, 1, 8).is_err());
+    assert!(validate_streams(4, 4, 7).is_err());
+    assert!(validate_streams(4, 4, 16).is_ok());
+    let ring: Ring =
+        serde_json::from_str(r#"{"kind":"stream","slot":2,"endpoint":129,"stream":3}"#).unwrap();
+    assert!(matches!(ring, Ring::Stream { stream: 3, .. }));
+}

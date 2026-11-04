@@ -36,6 +36,7 @@ fn ring_parts(ring: Ring) -> (u8, u8) {
     match ring {
         Ring::Command => (0, 0),
         Ring::Endpoint { slot, endpoint } => (slot, endpoint),
+        Ring::Stream { slot, endpoint, .. } => (slot, endpoint),
     }
 }
 impl LocalController {
@@ -76,6 +77,27 @@ impl LocalController {
         request: Op,
     ) -> Result<Value, OperationError> {
         match request {
+            Op::StreamConfigure {
+                slot,
+                endpoint,
+                entries,
+                device_max_streams,
+            } => {
+                let cap = (self.read_register(16)? >> 12) & 15;
+                crate::domain::models::raw::validate_streams(
+                    cap as u8,
+                    device_max_streams,
+                    entries,
+                )?;
+                let host = self
+                    .host
+                    .as_mut()
+                    .ok_or_else(|| OperationError::validation("host unavailable"))?;
+                device_future(host.configure_streams(slot, endpoint, entries))?;
+                Ok(
+                    json!({"entries":entries,"first_stream":1,"last_stream":entries-1,"managed_state":"unknown","end_to_end":"requires stream-capable fixture"}),
+                )
+            }
             Op::SlotEnable => {
                 let host = self
                     .host
@@ -306,12 +328,15 @@ impl LocalController {
                 let handle = self.raw.handle(session)?;
                 let (slot, endpoint) = ring_parts(ring);
                 self.raw.published = true; // Prepared dependencies also pin mappings.
-                let (index, cycle, address) = self
+                let host = self
                     .host
                     .as_mut()
-                    .ok_or_else(|| OperationError::validation("host unavailable"))?
-                    .raw_place(slot, endpoint, words)
-                    .map_err(usb_error)?;
+                    .ok_or_else(|| OperationError::validation("host unavailable"))?;
+                let (index, cycle, address) = match ring {
+                    Ring::Stream { stream, .. } => host.stream_place(slot, endpoint, stream, words),
+                    _ => host.raw_place(slot, endpoint, words),
+                }
+                .map_err(usb_error)?;
                 self.raw.staged.remove(&id);
                 self.raw.used.insert(ring, used + 1);
                 self.raw
@@ -334,11 +359,17 @@ impl LocalController {
                 let (slot, endpoint) = ring_parts(ring);
                 // Pin all current/future raw mappings before any controller-visible cycle.
                 self.raw.published = true;
-                self.host
+                let host = self
+                    .host
                     .as_mut()
-                    .ok_or_else(|| OperationError::validation("host unavailable"))?
-                    .raw_publish(slot, endpoint, index, cycle)
-                    .map_err(usb_error)?;
+                    .ok_or_else(|| OperationError::validation("host unavailable"))?;
+                match ring {
+                    Ring::Stream { stream, .. } => {
+                        host.stream_publish(slot, endpoint, stream, index, cycle)
+                    }
+                    _ => host.raw_publish(slot, endpoint, index, cycle),
+                }
+                .map_err(usb_error)?;
                 self.raw.placed.get_mut(&id).unwrap().4 = true;
                 Ok(json!({"published":token,"trb_iova":address,"managed_state":"unknown"}))
             }
