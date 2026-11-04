@@ -5,6 +5,13 @@ use crate::domain::models::{
 };
 use std::time::{Duration, Instant};
 pub trait RequestBackend: ConfigurationBackend {
+    fn submit_iso_packets(
+        &mut self,
+        _request: OwnedRequest,
+        _packets: Vec<usize>,
+    ) -> Result<u64, OperationError> {
+        Err(unsupported("iso packets unavailable in this backend"))
+    }
     /// Err guarantees no request was published. Uncertain publication must retain
     /// ownership and return an accepted token whose later result requires recovery.
     fn submit_request(&mut self, request: OwnedRequest) -> Result<u64, OperationError>;
@@ -19,6 +26,27 @@ pub(crate) struct RequestRecord {
 }
 impl<B: RequestBackend> UsbSession<B> {
     pub fn submit_request(&mut self, spec: RequestSpec) -> Result<RequestReport, OperationError> {
+        self.submit_request_packets(spec, None)
+    }
+    pub fn submit_request_packets(
+        &mut self,
+        spec: RequestSpec,
+        packets: Option<Vec<usize>>,
+    ) -> Result<RequestReport, OperationError> {
+        if let Some(packets) = &packets {
+            if spec.transfer_type != TransferType::Isochronous
+                || packets.is_empty()
+                || packets.len() > 128
+                || packets
+                    .iter()
+                    .try_fold(0usize, |sum, n| sum.checked_add(*n))
+                    != Some(spec.length)
+            {
+                return Err(OperationError::validation(
+                    "iso packet lengths must sum to the requested buffer",
+                ));
+            }
+        }
         self.check_request_capacity()?;
         let request = spec.prepare()?;
         let metadata = request.metadata.clone();
@@ -36,6 +64,7 @@ impl<B: RequestBackend> UsbSession<B> {
             let expected = match metadata.transfer_type {
                 TransferType::Bulk => "bulk",
                 TransferType::Interrupt => "interrupt",
+                TransferType::Isochronous => "isochronous",
                 _ => unreachable!(),
             };
             if !self
@@ -52,7 +81,11 @@ impl<B: RequestBackend> UsbSession<B> {
             }
         }
         let id = self.session.requests.submit()?;
-        let result = self.session.initialized_backend()?.submit_request(request);
+        let backend = self.session.initialized_backend()?;
+        let result = match packets {
+            Some(packets) => backend.submit_iso_packets(request, packets),
+            None => backend.submit_request(request),
+        };
         let token = match self.effect(result) {
             Ok(token) => token,
             Err(error) => {

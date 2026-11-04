@@ -34,7 +34,7 @@ pub fn registry() -> Vec<Capability> {
     vec![
         Capability {
             operation: "literal_owner_operations",
-            commands: &["raw"],
+            commands: &["raw", "iso_packets"],
             availability: Availability::Implemented,
             boundary: Boundary::LibraryProfile,
             evidence: &["compiled"],

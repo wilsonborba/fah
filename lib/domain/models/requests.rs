@@ -16,6 +16,7 @@ pub enum TransferType {
     Control,
     Bulk,
     Interrupt,
+    Isochronous,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

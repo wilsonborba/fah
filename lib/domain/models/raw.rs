@@ -17,6 +17,12 @@ pub enum Ring {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RawOperation {
+    IsoSchedule {
+        slot: u8,
+        endpoint: u8,
+        asap: bool,
+        frame_id: u16,
+    },
     Inspect,
     RegisterRead {
         offset: usize,
