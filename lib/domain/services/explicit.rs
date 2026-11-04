@@ -6,10 +6,51 @@ use crate::domain::models::{
     requests::RequestReport,
 };
 pub trait ExplicitBackend: RecoveryBackend {
+    fn raw_operation(
+        &mut self,
+        _session: u64,
+        _request: crate::domain::models::raw::RawOperation,
+    ) -> Result<serde_json::Value, OperationError> {
+        Err(crate::domain::models::requests::unsupported(
+            "raw operations require the hosted owner",
+        ))
+    }
     fn submit_control_plan(&mut self, plan: ValidatedControlPlan) -> Result<u64, OperationError>;
     fn noop(&mut self) -> Result<[u32; 4], OperationError>;
 }
 impl<B: ExplicitBackend> UsbSession<B> {
+    pub fn raw_operation(
+        &mut self,
+        request: crate::domain::models::raw::RawOperation,
+    ) -> Result<serde_json::Value, OperationError> {
+        let identity = self.session.identity();
+        use crate::domain::models::raw::RawOperation as Op;
+        if matches!(
+            &request,
+            Op::RegisterWrite { .. }
+                | Op::Place { .. }
+                | Op::Publish { .. }
+                | Op::Doorbell { .. }
+                | Op::Command { .. }
+                | Op::Transfer { .. }
+        ) {
+            // A partial backend failure must not restore a stale managed view.
+            self.session.recovery_required();
+        }
+        let result = self
+            .session
+            .recovery_backend()?
+            .raw_operation(identity, request);
+        if let Ok(value) = &result
+            && value
+                .get("managed_state")
+                .and_then(serde_json::Value::as_str)
+                == Some("unknown")
+        {
+            self.session.recovery_required();
+        }
+        result
+    }
     pub fn submit_control_plan(
         &mut self,
         plan: ControlPlan,

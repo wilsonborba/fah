@@ -18,8 +18,11 @@ use std::{
 };
 type Adapter = DmaAdapter<VfioMappingProvider>;
 type Pump = EventPump<BoundDrain<crab_usb::EventHandler>>;
+#[path = "controller_raw.rs"]
+mod raw;
 /// Owns the only CrabUSB engine, its consumer, mappings and VFIO lifetime.
 pub struct LocalController {
+    raw: raw::RawOwner,
     run_id: String,
     target: Option<String>,
     resources: Option<GuestResources>,
@@ -38,6 +41,7 @@ pub struct LocalController {
 impl LocalController {
     pub fn new(run_id: String) -> Self {
         Self {
+            raw: Default::default(),
             run_id,
             target: None,
             resources: None,
@@ -755,6 +759,12 @@ impl super::teardown::ShutdownBackend for LocalShutdown<'_> {
                 }
             }
             DropDriver => {
+                if let Some(adapter) = owner.adapter {
+                    for lease in owner.raw.leases.values() {
+                        adapter.raw_retire(*lease)?;
+                    }
+                }
+                owner.raw = Default::default();
                 drop(owner.host.take());
                 owner.pending.clear();
                 drop(owner.binding.take());
@@ -1004,6 +1014,13 @@ impl LocalController {
 }
 
 impl crate::domain::services::explicit::ExplicitBackend for LocalController {
+    fn raw_operation(
+        &mut self,
+        session: u64,
+        request: crate::domain::models::raw::RawOperation,
+    ) -> Result<serde_json::Value, OperationError> {
+        self.execute_raw(session, request)
+    }
     fn submit_control_plan(
         &mut self,
         plan: crate::domain::models::control_plan::ValidatedControlPlan,
