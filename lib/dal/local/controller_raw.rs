@@ -13,6 +13,9 @@ pub(super) struct RawOwner {
     placed: BTreeMap<u64, (Ring, usize, bool, u64, bool)>,
     used: BTreeMap<Ring, usize>,
     published: bool,
+    unknown_references: bool,
+    active_dependencies: Vec<u64>,
+    dependencies: BTreeMap<u64, std::collections::BTreeSet<u64>>,
 }
 impl RawOwner {
     fn handle(&mut self, session: u64) -> Result<Handle, OperationError> {
@@ -77,6 +80,32 @@ impl LocalController {
         request: Op,
     ) -> Result<Value, OperationError> {
         match request {
+            Op::Barrier => {
+                std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+                Ok(json!({"barrier":"seq_cst","packet_timing_guaranteed":false}))
+            }
+            Op::Timing => {
+                let runtime = (self.read_register(24)? & !31) as usize;
+                Ok(
+                    json!({"mfindex":self.read_register(runtime)? & 0x3fff,"units":"125us modulo16384","physical_timing_guaranteed":false}),
+                )
+            }
+            Op::Moderation { interval, counter } => {
+                let runtime = (self.read_register(24)? & !31) as usize;
+                let offset = runtime + 0x24;
+                self.read_register(offset)?;
+                unsafe {
+                    self.mapping
+                        .as_ref()
+                        .unwrap()
+                        .pointer()
+                        .as_ptr()
+                        .add(offset)
+                        .cast::<u32>()
+                        .write_volatile(interval as u32 | ((counter as u32) << 16));
+                }
+                Ok(json!({"interval":interval,"counter":counter,"interrupter":0}))
+            }
             Op::NormalBuild {
                 iova,
                 length,
@@ -94,6 +123,7 @@ impl LocalController {
                 input,
             } => {
                 let mut addresses = Vec::new();
+                let mut dependencies = Vec::new();
                 for segment in segments {
                     let lease = self.raw_lease(segment.handle, session)?;
                     if segment
@@ -106,16 +136,23 @@ impl LocalController {
                         ));
                     }
                     addresses.push((lease.iova + segment.offset as u64, segment.length));
+                    dependencies.push(segment.handle.sequence);
                 }
                 let trbs = crate::domain::models::raw::scatter_td(&addresses, max_packet, input)?;
-                self.execute_raw(
+                self.raw.active_dependencies = dependencies;
+                let result = self.execute_raw(
                     session,
                     Op::Transfer {
                         slot,
                         endpoint,
                         trbs,
                     },
-                )
+                );
+                self.raw.active_dependencies.clear();
+                if result.is_err() {
+                    self.raw.unknown_references = true;
+                }
+                result
             }
             Op::StreamConfigure {
                 slot,
@@ -275,6 +312,7 @@ impl LocalController {
                 self.read_register(offset)?;
                 let mapping = self.mapping.as_ref().unwrap();
                 self.raw.published = true;
+                self.raw.unknown_references = true;
                 unsafe {
                     mapping
                         .pointer()
@@ -332,12 +370,39 @@ impl LocalController {
                 let lease = self.raw_lease(handle, session)?;
                 let adapter = self.adapter.unwrap();
                 adapter.raw_retire(lease).map_err(os_error)?;
-                if !self.raw.published {
+                let dependencies = self
+                    .raw
+                    .dependencies
+                    .get(&handle.sequence)
+                    .cloned()
+                    .unwrap_or_default();
+                let mut proven = dependencies.is_empty() && !self.raw.unknown_references;
+                if !dependencies.is_empty() && !self.raw.unknown_references {
+                    self.execute_raw(session, Op::Drain { timeout_ms: 1000 })?;
+                    let events = self
+                        .host
+                        .as_ref()
+                        .unwrap()
+                        .raw_events(0, 4096)
+                        .map_err(usb_error)?;
+                    proven = dependencies.iter().all(|address| {
+                        events.iter().any(|(_, words)| {
+                            ((words[3] >> 10) & 63) == 32
+                                && words[3] & (1 << 2) == 0
+                                && matches!(words[2] >> 24, 1 | 13)
+                                && ((words[0] as u64) | ((words[1] as u64) << 32)) == *address
+                        })
+                    });
+                }
+                if proven && !self.raw.unknown_references {
                     // No literal operation has ever been visible to this controller.
                     unsafe { adapter.reclaim_lease_after_quiescence(lease) }.map_err(os_error)?;
                     self.raw.leases.remove(&handle.sequence);
+                    self.raw.dependencies.remove(&handle.sequence);
                 }
-                Ok(json!({"retired":true,"retained_until_close":self.raw.published}))
+                Ok(
+                    json!({"retired":true,"released":proven&&!self.raw.unknown_references,"retained_until_close":!proven||self.raw.unknown_references}),
+                )
             }
             Op::Compose { words } => {
                 if self.raw.staged.len() >= 4096 {
@@ -368,6 +433,9 @@ impl LocalController {
                 let handle = self.raw.handle(session)?;
                 let (slot, endpoint) = ring_parts(ring);
                 self.raw.published = true; // Prepared dependencies also pin mappings.
+                if self.raw.active_dependencies.is_empty() {
+                    self.raw.unknown_references = true;
+                }
                 let host = self
                     .host
                     .as_mut()
@@ -426,6 +494,9 @@ impl LocalController {
                 let offset = base + slot as usize * 4;
                 self.read_register(offset)?;
                 self.raw.published = true;
+                if self.raw.active_dependencies.is_empty() {
+                    self.raw.unknown_references = true;
+                }
                 let value = endpoint as u32 | ((stream as u32) << 16);
                 unsafe {
                     self.mapping
@@ -450,7 +521,11 @@ impl LocalController {
                     .raw_events(since, limit)
                     .map_err(usb_error)?;
                 let next = events.last().map_or(since, |(seq, _)| *seq);
-                Ok(json!({"events":events,"next":next}))
+                let decoded:Vec<_>=events.iter().map(|(sequence,words)|{
+                    let kind=((words[3]>>10)&63)as u8;let code=(words[2]>>24)as u8;
+                    json!({"sequence":sequence,"type":kind,"code":code,"name":crate::domain::models::raw::completion_name(code),"class":crate::domain::models::raw::completion_class(kind,code)})
+                }).collect();
+                Ok(json!({"events":events,"decoded":decoded,"next":next}))
             }
             Op::Drain { timeout_ms } => {
                 if timeout_ms > 60000 {
@@ -533,6 +608,12 @@ impl LocalController {
                         serde_json::from_value::<Handle>(placed["publish_token"].clone()).unwrap(),
                     );
                 }
+                if let Some(last) = tokens.last() {
+                    let address = self.raw.placed[&last.sequence].3;
+                    for id in self.raw.active_dependencies.clone() {
+                        self.raw.dependencies.entry(id).or_default().insert(address);
+                    }
+                }
                 for token in tokens.iter().skip(1) {
                     self.execute_raw(session, Op::Publish { token: *token })?;
                 }
@@ -562,9 +643,15 @@ impl LocalController {
                 parameter,
                 status,
                 control,
-            } => Ok(
-                json!({"words":[parameter as u32,(parameter>>32)as u32,status,(control&!(63<<10))|((command as u32&63)<<10)],"executed":false}),
-            ),
+            } => {
+                let code = command.code();
+                if code > 63 {
+                    return Err(OperationError::validation("TRB type exceeds6bits"));
+                }
+                Ok(
+                    json!({"words":[parameter as u32,(parameter>>32)as u32,status,(control&!(63<<10))|((code as u32)<<10)],"executed":false,"capability_support":"not inferred from encoding"}),
+                )
+            }
         }
     }
 }

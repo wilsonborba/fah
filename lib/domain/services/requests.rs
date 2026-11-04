@@ -33,19 +33,18 @@ impl<B: RequestBackend> UsbSession<B> {
         spec: RequestSpec,
         packets: Option<Vec<usize>>,
     ) -> Result<RequestReport, OperationError> {
-        if let Some(packets) = &packets {
-            if spec.transfer_type != TransferType::Isochronous
+        if let Some(packets) = &packets
+            && (spec.transfer_type != TransferType::Isochronous
                 || packets.is_empty()
                 || packets.len() > 128
                 || packets
                     .iter()
                     .try_fold(0usize, |sum, n| sum.checked_add(*n))
-                    != Some(spec.length)
-            {
-                return Err(OperationError::validation(
-                    "iso packet lengths must sum to the requested buffer",
-                ));
-            }
+                    != Some(spec.length))
+        {
+            return Err(OperationError::validation(
+                "iso packet lengths must sum to the requested buffer",
+            ));
         }
         self.check_request_capacity()?;
         let request = spec.prepare()?;
