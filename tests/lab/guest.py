@@ -169,13 +169,13 @@ class Cli:
         assert reclaimed==completed
         return completed
 
-    def quit(self):
+    def quit(self,expected_exit=0):
         if self.process.poll()is None:
             self.command({'op':'quit'})
             self.process.wait(timeout=10)
         self.errors.seek(0)
         errors=self.errors.read().decode(errors='replace')
-        assert self.process.returncode==0,dict(exit=self.process.returncode,stderr=errors)
+        assert self.process.returncode==expected_exit,dict(exit=self.process.returncode,expected_exit=expected_exit,stderr=errors)
         assert not errors,errors
 
 
@@ -624,6 +624,7 @@ def faults():
 
 def m8_behaviors():
     cli=Cli()
+    expected_exit=0
     def raw(action,**args):return cli.command({'op':'raw','request':dict(action=action,**args)})
     def case(name,**values):report('m8_case',name=name,verified=True,**values)
     def alloc(length):return raw('dma_alloc',bytes=length)['handle']
@@ -732,9 +733,10 @@ def m8_behaviors():
         cli.command({'op':'open','target':BDF});cli.command({'op':'init'})
         rejected=cli.raw({'op':'raw','request':{'action':'dma_read','handle':retained,'offset':0,'length':1}})
         assert rejected['outcome']['status']=='failed'
+        expected_exit=1
         case('session_handles')
         cli.command({'op':'close'});assert cli.command({'op':'state'})['resources']['retained_allocations']==0
-    finally:cli.quit()
+    finally:cli.quit(expected_exit=expected_exit)
 
 
 def main():
