@@ -678,6 +678,19 @@ def m8_behaviors():
             if fixture_role(endpoints)=='storage':storage=(value['device'],endpoints)
         assert storage
         device,endpoints=storage;slot=device['slot']
+        # A known Evaluate Context with unchanged slot fields may reconcile.
+        snapshot=raw('slot_context',slot=slot)
+        context=alloc(33*cap['context_bytes'])
+        image=bytearray(33*cap['context_bytes']);struct.pack_into('<I',image,4,1)
+        for i,word in enumerate(snapshot['words']):struct.pack_into('<I',image,cap['context_bytes']+i*4,word)
+        raw('dma_write',handle=context,offset=0,bytes=list(image))
+        pointer=raw('dma_inspect',handle=context)['iova']
+        evaluated=raw('command',words=[pointer&0xffffffff,pointer>>32,0,(13<<10)|(slot<<24)])
+        assert evaluated['completion'][2]>>24==1,evaluated
+        reconciled=raw('reconcile',slot=slot)
+        assert reconciled['restored'] and reconciled['managed_state']=='coherent',reconciled
+        assert cli.command({'op':'ports'})
+        case('scoped_reconcile',generation=evaluated['coherence_generation'])
         incoming=next(ep for ep in endpoints if ep['direction']=='in')
         outgoing=next(ep for ep in endpoints if ep['direction']=='out')
         # Real131072-byte READ10 through three chained TRBs, crossing two boundaries.

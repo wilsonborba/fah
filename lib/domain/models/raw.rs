@@ -487,3 +487,142 @@ pub fn completion_name(code: u8) -> &'static str {
         _ => "unknown",
     }
 }
+
+/// A known opcode never narrows an unrecognized command's effects implicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Effect {
+    Observe,
+    Slot { slot: u8, device: bool },
+    Global,
+}
+pub fn effect(op: &RawOperation) -> Effect {
+    use RawOperation as O;
+    match op {
+        O::Command { words, .. } => {
+            let ty = (words[3] >> 10) & 63;
+            let slot = (words[3] >> 24) as u8;
+            // Reserved bits or unsupported layouts stay globally unknown. Cycle is owner-controlled.
+            let allowed = (255 << 24)
+                | (63 << 10)
+                | 1
+                | if ty == 12 {
+                    1 << 9
+                } else if ty == 15 {
+                    1 << 23
+                } else {
+                    0
+                };
+            if words[3] & !allowed != 0 || words[2] != 0 {
+                return Effect::Global;
+            }
+            if ty == 23 && words[0] == 0 && words[1] == 0 && words[3] & !1 == 23 << 10 {
+                Effect::Observe
+            } else if slot != 0 && matches!(ty, 12..=16) {
+                Effect::Slot {
+                    slot,
+                    device: false,
+                }
+            } else {
+                Effect::Global
+            }
+        }
+        O::Transfer {
+            slot,
+            endpoint,
+            trbs,
+        } if endpoint & 15 == 0 => {
+            // Read immediate SETUP for classification only; never alter it.
+            if let Some(t) = trbs
+                .first()
+                .filter(|t| (t[3] >> 10) & 63 == 2 && t[3] & (1 << 6) != 0 && t[2] & 0x1ffff == 8)
+            {
+                let setup = (t[0] as u64) | ((t[1] as u64) << 32);
+                let bm = setup as u8;
+                let request = (setup >> 8) as u8;
+                if bm & 0x60 == 0 && matches!((bm, request), (0, 5 | 9) | (1, 11) | (2, 1)) {
+                    return Effect::Slot {
+                        slot: *slot,
+                        device: true,
+                    };
+                }
+            }
+            Effect::Global
+        }
+        O::DevicePacketSize { slot, .. }
+        | O::DeviceInterface { slot, .. }
+        | O::DeviceConfiguration { slot, .. }
+        | O::EndpointConfigure { slot, .. }
+        | O::HubConfigure { slot, .. }
+        | O::StreamConfigure { slot, .. }
+        | O::AddressRoute { slot, .. } => Effect::Slot {
+            slot: *slot,
+            device: true,
+        },
+        O::RegisterWrite { .. }
+        | O::SlotEnable
+        | O::Place { .. }
+        | O::Publish { .. }
+        | O::Doorbell { .. }
+        | O::Transfer { .. }
+        | O::ScatterTransfer { .. } => Effect::Global,
+        _ => Effect::Observe,
+    }
+}
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SlotEffect {
+    pub generation: u64,
+    pub device_uncertain: bool,
+    pub pending_at_mutation: bool,
+    pub baseline: Option<serde_json::Value>,
+}
+#[derive(Debug, Default, Serialize)]
+pub struct Coherence {
+    pub generation: u64,
+    pub global_unknown: bool,
+    pub slots: std::collections::BTreeMap<u8, SlotEffect>,
+}
+impl Coherence {
+    pub fn mutate(
+        &mut self,
+        effect: Effect,
+        baseline: Option<serde_json::Value>,
+        pending: bool,
+    ) -> Result<(), OperationError> {
+        if effect == Effect::Observe {
+            return Ok(());
+        }
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| OperationError::validation("coherence generation exhausted"))?;
+        match effect {
+            Effect::Global => self.global_unknown = true,
+            Effect::Slot { slot, device } => {
+                let entry = self.slots.entry(slot).or_insert_with(|| SlotEffect {
+                    baseline,
+                    ..Default::default()
+                });
+                entry.generation = self.generation;
+                entry.device_uncertain |= device;
+                entry.pending_at_mutation |= pending;
+            }
+            Effect::Observe => {}
+        }
+        Ok(())
+    }
+    /// Equality is proof only for known controller-only effects against the original view.
+    /// Device uncertainty, unknown global effects and pending DMA are independent blockers.
+    pub fn reconcile(&mut self, slot: u8, current: &serde_json::Value, pending: bool) -> bool {
+        let matches = !self.global_unknown
+            && !pending
+            && self.slots.get(&slot).is_some_and(|s| {
+                !s.device_uncertain
+                    && !s.pending_at_mutation
+                    && s.baseline.as_ref() == Some(current)
+            });
+        if matches {
+            self.slots.remove(&slot);
+        }
+        matches
+    }
+}

@@ -236,7 +236,8 @@ impl LocalController {
                 let input = host.input_slot_context_words(slot).map_err(|e| {
                     OperationError::validation(format!("input slot context: {e:?}"))
                 })?;
-                Ok(json!({"slot":slot,"words":words,"input_words":input}))
+                let endpoints = host.endpoint_context_words(slot).map_err(usb_error)?;
+                Ok(json!({"slot":slot,"words":words,"input_words":input,"endpoints":endpoints}))
             }
             Op::HubConfigure {
                 slot,
