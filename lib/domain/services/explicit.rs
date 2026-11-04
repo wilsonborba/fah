@@ -29,6 +29,7 @@ impl<B: ExplicitBackend> UsbSession<B> {
             &request,
             Op::RegisterWrite { .. }
                 | Op::SlotEnable
+                | Op::StreamConfigure { .. }
                 | Op::AddressRoute { .. }
                 | Op::HubConfigure { .. }
                 | Op::DeviceConfiguration { .. }
