@@ -47,9 +47,9 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo clippy --locked --all-targets --features hosted-direct -- -D warnings
 cargo test --locked
 cargo test --locked --features hosted-direct
-python3 scripts/test-backend.py
+python3 tests/backend.py
 python3 -m unittest discover -s tests -p 'test_*.py'
-python3 scripts/check-capabilities.py
+python3 tests/capabilities.py
 ```
 
 Private backend tests use their own committed lockfile and the same maintained
@@ -73,7 +73,7 @@ source storage, not an upstream fork or an independent second controller owner.
 access and no changes. It rebuilds the expected trees from the pinned revision, the
 pinned archive and the patches in a temporary directory, then compares every file.
 Only CrabUSB's Git metadata and the top-level `target/` and `Cargo.lock` written by
-`scripts/test-backend.py` are excluded. A difference stops the command and stays in
+`tests/backend.py` are excluded. A difference stops the command and stays in
 place. Both modes give the same result from any working directory.
 
 CrabUSB changes expose explicit steps, hosted synchronization, reviewed DMA accesses,
@@ -95,7 +95,7 @@ An upstream change or a green build alone does not validate the updated driver.
 The tested host is Debian13 x86_64 with accessible `/dev/kvm`, QEMU10.0.8,
 Python3.13, BusyBox, kmod, `ldd`, `findmnt` and `dpkg-deb`. The machine type is pinned
 to `pc-q35-10.0`; the guest kernel/config/modules are fingerprinted in
-[`scripts/lab/kernel.json`](scripts/lab/kernel.json). The launcher needs at least
+[`tests/lab/kernel.json`](tests/lab/kernel.json). The launcher needs at least
 4GiB available host memory and 2GiB free disk before starting its **2GiB/2vCPU**
 headless guest. It checks current headroom; this is not a guarantee against host crashes.
 
@@ -145,26 +145,28 @@ record the exact userspace libraries and executable copied into the initramfs.
 
 ### Run and collect evidence
 
-VM preparation/execution is deliberately restricted to a **clean
-`release/v0.1.0`** checkout. Build outputs/caches are ignored and do not dirty it.
+VM preparation/execution and candidate packaging require a **clean
+`release/v<package.version>`** checkout. Both tools read the version from
+`Cargo.toml`; the current version uses `release/v0.2.0`. Build outputs/caches
+are ignored and do not dirty the checkout.
 After changing the release source, rebuild the executable and prepare a new image.
 Build the payload from a clean release profile with the pinned toolchain; do not set
 `RUSTUP_TOOLCHAIN`. Cargo reuses artifacts from any toolchain of the same version,
 and a different installation (for example one with `rust-src`) embeds other paths.
 
 ```sh
-git switch release/v0.1.0
+git switch release/v0.2.0
 python3 scripts/prepare-dependencies.py
 cargo clean --release
 cargo build --locked --release --features hosted-direct
-python3 scripts/lab.py plan
-python3 scripts/lab.py prepare --kernel-root "$FAH_KERNEL_DIR/root"
-python3 scripts/lab.py run --suite feasibility
-python3 scripts/lab.py run --suite fixture
-python3 scripts/lab.py run --suite smoke
-python3 scripts/lab.py run --suite smoke
-python3 scripts/lab.py run --suite explicit
-python3 scripts/lab.py run --suite faults
+python3 tests/lab/lab.py plan
+python3 tests/lab/lab.py prepare --kernel-root "$FAH_KERNEL_DIR/root"
+python3 tests/lab/lab.py run --suite feasibility
+python3 tests/lab/lab.py run --suite fixture
+python3 tests/lab/lab.py run --suite smoke
+python3 tests/lab/lab.py run --suite smoke
+python3 tests/lab/lab.py run --suite explicit
+python3 tests/lab/lab.py run --suite faults
 ```
 
 With the exact kernel already installed, omit `--kernel-root` to use `/` as the
@@ -196,8 +198,8 @@ Generated files stay inside the checkout and are ignored by Git:
 trace is independent of FAH logging and is not a physical USB analyzer capture.
 
 ```sh
-python3 scripts/lab.py stop --run <generated-run-directory-name>
-python3 scripts/lab.py cleanup --run <generated-run-directory-name>
+python3 tests/lab/lab.py stop --run <generated-run-directory-name>
+python3 tests/lab/lab.py cleanup --run <generated-run-directory-name>
 ```
 
 Stop validates that the recorded PID belongs to that generated QEMU. Cleanup requires
@@ -263,7 +265,7 @@ host endpoint setup are separate operations. Inspection does not perform these s
 
 The following syntax examples use **illustrative IDs**; replace the complete ID from
 your own responses. The automated guest client in
-[`scripts/lab/guest.py`](scripts/lab/guest.py) demonstrates extracting real IDs.
+[`tests/lab/guest.py`](tests/lab/guest.py) demonstrates extracting real IDs.
 
 ```json
 {"op":"port_reset","port":{"session":123,"generation":1,"number":2},"warm":false}
@@ -274,8 +276,9 @@ your own responses. The automated guest client in
 
 `submit` supports ordinary complete control, bulk and interrupt requests. OUT bytes
 must match length; IN storage is allocated by the owner. Configure host endpoints
-before non-control submissions; Low Speed bulk, hubs/streams/isochronous transfers
-and lifecycle-changing requests through the ordinary control path are unsupported.
+before non-control submissions. Low Speed bulk and lifecycle-changing requests
+through the ordinary control path are unsupported. Isochronous requests are
+available; explicit hub and stream operations use the raw namespace below.
 
 `control_plan` supports declared complete stages. The reviewed compatibility profile
 preserves independent header and DATA fields; the guest example is `wLength=8`,
@@ -285,9 +288,9 @@ DATA buffer18, actual8. Other device/parameter combinations require their own ev
 {"op":"control_plan","plan":{"device":{"session":123,"generation":1,"slot":1},"profile":"device_compatibility","setup":{"request_type":128,"request":6,"value":256,"index":0,"length":8},"data_stage":{"direction":"in","length":18},"status_direction":"out","data":[]}}
 ```
 
-A status stage is required in this profile. Arbitrary partial/delayed transactions,
-per-packet DATA0/DATA1 overrides, direct PHY driving and caller DMA-pointer writes
-are unavailable. Typed `noop`, BSR and `reset_endpoint` are controller operations;
+A status stage is required in this convenience profile. Partial or delayed
+control experiments use literal raw publication below. Per-packet DATA0/DATA1
+overrides and direct PHY driving remain outside the xHCI interface. Typed `noop`, BSR and `reset_endpoint` are controller operations;
 there is no parallel command engine.
 
 ### Requests, recovery and convenience
@@ -338,7 +341,7 @@ buffer lifetimes. VFIO/MMIO is **local** access. The CLI never creates a second 
 or gives caller pointers to an uncoordinated raw ring.
 
 The inventory below is generated from `fah capabilities`; `python3
-scripts/check-capabilities.py` verifies agreement. JSON also includes implementation/test
+tests/capabilities.py` verifies agreement. JSON also includes implementation/test
 references and exact guest run provenance. Source implementation baseline is4f0f03a;
 release packages record their final source/binary fingerprints separately.
 
@@ -353,46 +356,54 @@ validation. Remaining gates are [isolated target #32](https://github.com/wilsonb
 <!-- FAH_CAPABILITIES_BEGIN -->
 | Operation | CLI operations | Availability | Evidence | Coverage limits |
 | --- | --- | --- | --- | --- |
-| [metadata_queries](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/presentation/cli/handlers.rs) | `help`, `version`, `capabilities` | implemented | compiled, fake_tested | describe syntax/version/capabilities without controller acquisition |
-| [session_state](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/presentation/cli/handlers.rs) | `state` | implemented | compiled, fake_tested, emulated_tested | observe session identity, ownership state and retained allocations |
-| [cached_inventory](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/presentation/cli/handlers.rs) | `devices`, `requests` | implemented | compiled, fake_tested | cached results are not fresh device-presence evidence |
-| [guest_acquire](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/dal/local/resources.rs) | `open` | implemented | compiled, fake_tested, emulated_tested | physical Intel acquisition intentionally unavailable |
-| [controller_init](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/dal/local/controller.rs) | `init` | implemented | compiled, fake_tested, emulated_tested | initialization sends no discovery/descriptors/configuration |
-| [coordinated_close](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/dal/local/teardown.rs) | `close`, `quit` | implemented | compiled, fake_tested, emulated_tested | failed proof retains resources/process for retry; SIGKILL is separate |
-| [inspect_ports](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/services/usb.rs) | `ports` | implemented | compiled, fake_tested, emulated_tested | read fresh port status without W1C acknowledgement |
-| [acknowledge_port](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/services/usb.rs) | `port_ack` | implemented | compiled, fake_tested | fake-tested; not a guest-tested W1C matrix |
-| [reset_port](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/services/usb.rs) | `port_reset` | implemented | compiled, fake_tested, emulated_tested | normal reset guest-tested; warm-reset branch has compile/static coverage only |
-| [enable_slot](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/services/usb.rs) | `slot_enable` | implemented | compiled, fake_tested, emulated_tested | enable exactly one slot after chosen-port reset |
-| [address_bsr](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/services/usb.rs) | `address` | implemented | compiled, fake_tested, emulated_tested | BSR command bit/model behavior tested; no physical bus capture |
-| [address_assigned](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/services/usb.rs) | `address` | implemented | compiled, fake_tested, emulated_tested | old TD replay explicitly excluded by independent trace |
-| [descriptor_read](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/services/usb.rs) | `descriptor` | implemented | compiled, fake_tested, emulated_tested | issue only the requested descriptor read and retain raw bytes/parse errors |
-| [ep0_packet_size](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/services/usb.rs) | `packet_size` | implemented | compiled, fake_tested, emulated_tested | set the explicitly selected speed-valid EP0 packet size |
-| [select_configuration](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/services/usb.rs) | `configuration` | implemented | compiled, fake_tested, emulated_tested | send explicit SET_CONFIGURATION and update device state |
-| [select_interface](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/services/usb.rs) | `interface` | implemented | compiled, fake_tested | fake-tested; nonzero alternate behavior is not guest-validated |
-| [host_endpoints](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/services/usb.rs) | `endpoints` | implemented | compiled, fake_tested, emulated_tested | control/bulk/interrupt profile; hubs, streams and isochronous I/O not exposed |
-| [control_complete](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/services/requests.rs) | `submit` | implemented | compiled, fake_tested, emulated_tested | reported code is the terminal TD event; intermediate events remain in emulator trace |
-| [bulk_interrupt](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/services/requests.rs) | `submit` | implemented | compiled, fake_tested, emulated_tested | Low Speed bulk rejected; pending means submitted, not an electrical bus-active sensor |
-| [control_plan](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/services/explicit.rs) | `control_plan` | implemented | compiled, fake_tested, emulated_tested | full plan only; arbitrary partial/delayed stages not exposed |
-| [control_plan_compatibility](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/models/control_plan.rs) | `control_plan` | implemented | compiled, fake_tested, emulated_tested | guest case: wLength8, DATA18, actual8; other devices/field combinations unverified |
-| [request_status](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/services/requests.rs) | `status` | implemented | compiled, fake_tested, emulated_tested | read a retained request state without a hardware poll |
-| [request_poll_wait](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/services/requests.rs) | `poll`, `wait` | implemented | compiled, fake_tested, emulated_tested | deadline ends the wait; it does not stop DMA or USB traffic |
-| [request_reclaim](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/services/requests.rs) | `reclaim` | implemented | compiled, fake_tested, emulated_tested | poll/wait may already retire a proven-complete streaming map; reclaim removes metadata |
-| [logical_cancel](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/services/requests.rs) | `logical_cancel` | implemented | compiled, fake_tested, emulated_tested | does not submit Stop Endpoint or suppress late data |
-| [abort_endpoint](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/services/recovery.rs) | `abort` | implemented | compiled, fake_tested, emulated_tested | endpoint-wide; old coherent ring quarantined until close; uncertain stop stays recovery-required |
-| [reset_endpoint_preserve](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/services/recovery.rs) | `reset_endpoint` | implemented | compiled, fake_tested, emulated_tested | command/model tested; no physical DATA PID/USB3 sequence measurement |
-| [reset_endpoint_state](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/services/recovery.rs) | `reset_endpoint` | implemented | compiled, fake_tested, emulated_tested | device protocol actions remain explicit; no arbitrary PID selection |
-| [scoped_stall_recovery](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/services/recovery.rs) | `reset_endpoint` | implemented | compiled, fake_tested, emulated_tested | unknown controller/event/teardown faults still require coordinated close |
-| [noop_command](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/services/explicit.rs) | `noop` | implemented | compiled, fake_tested, emulated_tested | no raw caller-provided DMA pointers or second command engine |
-| [convenience_enumeration](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/presentation/cli/flows.rs) | `enumerate` | implemented | compiled, fake_tested, emulated_tested | configuration/endpoints only with configure=true; no timing guarantee |
-| [ordered_batch](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/presentation/cli/flows.rs) | `batch` | implemented | compiled, fake_tested | fake-tested; preview validates syntax/shape, not unavailable execution state |
-| [unsupported_queries](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/presentation/cli/handlers.rs) | `unsupported` | implemented | compiled, fake_tested, emulated_tested | return a capability error without approximate USB actions |
-| [split_control_transaction](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/models/control_plan.rs) | — | unsupported | static_review | library profile limit; not a statement that the electrical interface forbids every such transaction |
-| [arbitrary_data_pid](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/models/control_plan.rs) | — | unsupported | static_review | TSP reset/preserve is a distinct operation |
-| [direct_dpdm](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/models/control_plan.rs) | — | unsupported | static_review | no Pico electrical-equivalence claim |
-| [raw_pointer_ring_mutation](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/models/control_plan.rs) | — | unsupported | static_review | one authority must own rings, contexts and lifetimes |
-| [timing_guarantees](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/domain/models/control_plan.rs) | — | unsupported | static_review | ordering/deadlines are software controls; physical timing remains unmeasured |
-| [physical_intel_validation](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/presentation/cli/handlers.rs) | — | planned | unresolved | see #32 and #33; notebook controller takeover remains blocked |
-| [ipad_a5_case_study](https://github.com/wilsonborba/fah/blob/4f0f03a/lib/presentation/cli/handlers.rs) | — | planned | unresolved | see #34; emulated USB success establishes no boot/exploitation capability |
+| [literal_owner_operations](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw`, `iso_packets` | implemented | compiled | unknown raw effects invalidate managed state and retain raw DMA until coordinated close; literal ring reservations bounded per session |
+| [metadata_queries](https://github.com/wilsonborba/fah/blob/feature/main/lib/presentation/cli/handlers.rs) | `help`, `version`, `capabilities` | implemented | compiled, fake_tested | describe syntax/version/capabilities without controller acquisition |
+| [session_state](https://github.com/wilsonborba/fah/blob/feature/main/lib/presentation/cli/handlers.rs) | `state` | implemented | compiled, fake_tested, emulated_tested | observe session identity, ownership state and retained allocations |
+| [cached_inventory](https://github.com/wilsonborba/fah/blob/feature/main/lib/presentation/cli/handlers.rs) | `devices`, `requests` | implemented | compiled, fake_tested | cached results are not fresh device-presence evidence |
+| [guest_acquire](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/resources.rs) | `open` | implemented | compiled, fake_tested, emulated_tested | physical Intel acquisition intentionally unavailable |
+| [controller_init](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller.rs) | `init` | implemented | compiled, fake_tested, emulated_tested | initialization sends no discovery/descriptors/configuration |
+| [coordinated_close](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/teardown.rs) | `close`, `quit` | implemented | compiled, fake_tested, emulated_tested | failed proof retains resources/process for retry; SIGKILL is separate |
+| [inspect_ports](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/usb.rs) | `ports` | implemented | compiled, fake_tested, emulated_tested | read fresh port status without W1C acknowledgement |
+| [acknowledge_port](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/usb.rs) | `port_ack` | implemented | compiled, fake_tested | fake-tested; not a guest-tested W1C matrix |
+| [reset_port](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/usb.rs) | `port_reset` | implemented | compiled, fake_tested, emulated_tested | normal reset guest-tested; warm-reset branch has compile/static coverage only |
+| [enable_slot](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/usb.rs) | `slot_enable` | implemented | compiled, fake_tested, emulated_tested | enable exactly one slot after chosen-port reset |
+| [address_bsr](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/usb.rs) | `address` | implemented | compiled, fake_tested, emulated_tested | BSR command bit/model behavior tested; no physical bus capture |
+| [address_assigned](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/usb.rs) | `address` | implemented | compiled, fake_tested, emulated_tested | old TD replay explicitly excluded by independent trace |
+| [descriptor_read](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/usb.rs) | `descriptor` | implemented | compiled, fake_tested, emulated_tested | issue only the requested descriptor read and retain raw bytes/parse errors |
+| [ep0_packet_size](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/usb.rs) | `packet_size` | implemented | compiled, fake_tested, emulated_tested | set the explicitly selected speed-valid EP0 packet size |
+| [select_configuration](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/usb.rs) | `configuration` | implemented | compiled, fake_tested, emulated_tested | send explicit SET_CONFIGURATION and update device state |
+| [select_interface](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/usb.rs) | `interface` | implemented | compiled, fake_tested | fake-tested; nonzero alternate behavior is not guest-validated |
+| [host_endpoints](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/usb.rs) | `endpoints` | implemented | compiled, fake_tested, emulated_tested | control/bulk/interrupt profile; hubs, streams and isochronous I/O not exposed |
+| [control_complete](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/requests.rs) | `submit` | implemented | compiled, fake_tested, emulated_tested | reported code is the terminal TD event; intermediate events remain in emulator trace |
+| [bulk_interrupt](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/requests.rs) | `submit` | implemented | compiled, fake_tested, emulated_tested | Low Speed bulk rejected; pending means submitted, not an electrical bus-active sensor |
+| [control_plan](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/explicit.rs) | `control_plan` | implemented | compiled, fake_tested, emulated_tested | full plan only; arbitrary partial/delayed stages not exposed |
+| [control_plan_compatibility](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/models/control_plan.rs) | `control_plan` | implemented | compiled, fake_tested, emulated_tested | guest case: wLength8, DATA18, actual8; other devices/field combinations unverified |
+| [request_status](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/requests.rs) | `status` | implemented | compiled, fake_tested, emulated_tested | read a retained request state without a hardware poll |
+| [request_poll_wait](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/requests.rs) | `poll`, `wait` | implemented | compiled, fake_tested, emulated_tested | deadline ends the wait; it does not stop DMA or USB traffic |
+| [request_reclaim](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/requests.rs) | `reclaim` | implemented | compiled, fake_tested, emulated_tested | poll/wait may already retire a proven-complete streaming map; reclaim removes metadata |
+| [logical_cancel](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/requests.rs) | `logical_cancel` | implemented | compiled, fake_tested, emulated_tested | does not submit Stop Endpoint or suppress late data |
+| [abort_endpoint](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/recovery.rs) | `abort` | implemented | compiled, fake_tested, emulated_tested | endpoint-wide; old coherent ring quarantined until close; uncertain stop stays recovery-required |
+| [reset_endpoint_preserve](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/recovery.rs) | `reset_endpoint` | implemented | compiled, fake_tested, emulated_tested | command/model tested; no physical DATA PID/USB3 sequence measurement |
+| [reset_endpoint_state](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/recovery.rs) | `reset_endpoint` | implemented | compiled, fake_tested, emulated_tested | device protocol actions remain explicit; no arbitrary PID selection |
+| [scoped_stall_recovery](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/recovery.rs) | `reset_endpoint` | implemented | compiled, fake_tested, emulated_tested | unknown controller/event/teardown faults still require coordinated close |
+| [noop_command](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/services/explicit.rs) | `noop` | implemented | compiled, fake_tested, emulated_tested | no raw caller-provided DMA pointers or second command engine |
+| [convenience_enumeration](https://github.com/wilsonborba/fah/blob/feature/main/lib/presentation/cli/flows.rs) | `enumerate` | implemented | compiled, fake_tested, emulated_tested | configuration/endpoints only with configure=true; no timing guarantee |
+| [ordered_batch](https://github.com/wilsonborba/fah/blob/feature/main/lib/presentation/cli/flows.rs) | `batch` | implemented | compiled, fake_tested | fake-tested; preview validates syntax/shape, not unavailable execution state |
+| [unsupported_queries](https://github.com/wilsonborba/fah/blob/feature/main/lib/presentation/cli/handlers.rs) | `unsupported` | implemented | compiled, fake_tested, emulated_tested | return a capability error without approximate USB actions |
+| [split_control_transaction](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested | experimental bus behavior is not guaranteed; unknown references retained until close; conventional full-stage profile remains available |
+| [arbitrary_data_pid](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/models/control_plan.rs) | — | unsupported | static_review | TSP reset/preserve is a distinct operation |
+| [direct_dpdm](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/models/control_plan.rs) | — | unsupported | static_review | no Pico electrical-equivalence claim |
+| [raw_pointer_ring_mutation](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested | experimental bus behavior is not guaranteed; unknown references retained until close; conventional full-stage profile remains available |
+| [timing_guarantees](https://github.com/wilsonborba/fah/blob/feature/main/lib/domain/models/control_plan.rs) | — | unsupported | static_review | ordering/deadlines are software controls; physical timing remains unmeasured |
+| [physical_intel_validation](https://github.com/wilsonborba/fah/blob/feature/main/lib/presentation/cli/handlers.rs) | — | planned | unresolved | see #32 and #33; notebook controller takeover remains blocked |
+| [ipad_a5_case_study](https://github.com/wilsonborba/fah/blob/feature/main/lib/presentation/cli/handlers.rs) | — | planned | unresolved | see #34; emulated USB success establishes no boot/exploitation capability |
+| [isochronous](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
+| [bulk_streams](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
+| [hub_topology](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
+| [scatter_gather](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
+| [protocol_inspection](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
+| [explicit_event_drain](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
+| [ordering_controls](https://github.com/wilsonborba/fah/blob/feature/main/lib/dal/local/controller_raw.rs) | `raw` | implemented | compiled, fake_tested | see release evidence for guest coverage; physical and fixture-dependent branches remain unproven |
 <!-- FAH_CAPABILITIES_END -->
 
 ## References and license
@@ -436,7 +447,70 @@ Artifacts default to `target/fah-release/`; `SHA256SUMS`, sidecar archive checks
 The binary is tested for the recorded Linux/userspace/toolchain; arbitrary-host byte
 identity or ABI compatibility is not promised.
 
-Regenerate the changelog with `git-cliff --tag v0.1.0 --output CHANGELOG.md` using
+Regenerate the changelog with `git-cliff --tag v0.2.0 --output CHANGELOG.md` using
 git-cliff2.10.1. The packaging tool never merges, tags or publishes. Final main/tag
 promotion follows the explicitly authorized release workflow after guest validation;
 publication of a hosted release remains a separate action.
+
+
+## Explicit xHCI operations (v0.2.0)
+
+The persistent shell accepts an additional `raw` namespace. The same owner handles
+all operations. No extra permission flag is required. Initialization and discovery
+remain separate. This build acquires only the marked emulated controller.
+
+```json
+{"op":"raw","request":{"action":"inspect"}}
+{"op":"raw","request":{"action":"dma_alloc","bytes":196608,"align":4096}}
+{"op":"raw","request":{"action":"command_build","command":"noop"}}
+{"op":"raw","request":{"action":"compose","words":[0,0,0,23552]}}
+{"op":"raw","request":{"action":"drain","timeout_ms":1000}}
+{"op":"raw","request":{"action":"events","since":0,"limit":256}}
+```
+
+Use returned handles with `dma_write`, `dma_read`, `dma_inspect` and `dma_unmap`.
+Handles contain a session identity and sequence. CPU pointers are never returned.
+`dma_unmap` requests retirement. Known scatter-transfer buffers can be released
+only after their terminal event. Unknown references retain storage until close.
+
+`compose`, `place`, `publish` and `doorbell` are separate actions. A place response
+returns a session-scoped publication token and its TRB IOVA. The owner maintains
+cycle, Link, wrap and barriers; all other literal words remain as supplied.
+`transfer` is the optional whole-TD convenience: it prepares the complete TD,
+publishes the initial gating TRB last, then rings the doorbell. `scatter_transfer`
+uses DMA-handle slices and splits at 64KiB addressed boundaries. `normal_build`
+returns encoded words without submitting them.
+
+`drain` asks the existing event consumer to drain without an IRQ. Its acknowledged
+result differs from timeout or failure. `events` reads a retained cursor stream;
+responses are bounded and an expired cursor returns an error. BEI/IOC fields are
+preserved. A raw event or enqueue result alone does not prove a completed TD.
+
+`register_read` and `register_write` address aligned offsets in the mapped BAR.
+`barrier`, `timing` (MFINDEX) and `moderation` (interrupter zero IMOD) expose ordering
+controls. Linux scheduling and physical packet timing remain unverified.
+
+For downstream devices, `slot_enable`, `address_route` and `hub_configure` expose
+route, speed and TT fields. `device_descriptor`, `device_configuration` and
+`endpoint_configure` prepare devices explicitly. `iso_schedule` selects ASAP or
+Frame ID. Ordinary `submit` accepts `isochronous`; `iso_packets` accepts an explicit
+packet-length array. `stream_configure` checks controller and device stream limits,
+creates primary arrays and retains a separate ring for each Stream ID. Select
+`{"kind":"stream","slot":1,"endpoint":129,"stream":1}` as the ring for placement,
+then ring the matching Stream ID explicitly. Controller/device support is required.
+
+Literal mutations invalidate the managed view before execution, including partial
+failure. Raw operations and coordinated close remain available. `reconcile`
+reports unknown state and required reconstruction; matching register values do
+not silently restore the old managed device view. Close/reopen rebuilds it.
+
+Resource limits are explicit: 128 literal reservations per ring until close,
+4096 staged TRBs, 65536 retained raw events, 256MiB per raw allocation, 4096 primary
+stream entries, 64KiB ordinary single-buffer requests and 128 iso packets per
+convenience request. Literal data/ring construction remains available through DMA
+and MMIO. These are implementation budgets, not claimed xHCI hardware limits.
+
+New capabilities are compiled and tested with synthetic resources. Release evidence
+records which paths passed in the emulated guest. Physical Intel behavior and the
+separate case study remain in M7. A stream fixture is required before claiming
+end-to-end stream I/O; capability detection and synthetic tests do not prove it.

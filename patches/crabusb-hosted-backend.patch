@@ -96,10 +96,10 @@ index 71b939e..4ab690c 100644
 -    }
 -}
 diff --git a/usb-host/src/backend/kmod/mod.rs b/usb-host/src/backend/kmod/mod.rs
-index e17466d..8d78520 100644
+index e17466d..e138d7d 100644
 --- a/usb-host/src/backend/kmod/mod.rs
 +++ b/usb-host/src/backend/kmod/mod.rs
-@@ -50,3 +50,145 @@ pub struct DeviceAddressInfo {
+@@ -50,3 +50,176 @@ pub struct DeviceAddressInfo {
      pub port_id: u8,
      pub infos: BTreeMap<Id<Hub>, HubInfo>,
  }
@@ -110,6 +110,37 @@ index e17466d..8d78520 100644
 +pub struct ExplicitHost {pub(crate) core:Xhci, devices:BTreeMap<u8,xhci::Device>}
 +#[cfg(feature = "hosted-direct")]
 +impl ExplicitHost {
++    pub async fn configure_streams(&mut self,slot:u8,address:u8,entries:u16)->Result<()> {
++        let max=self.core.reg.read().capability.hccparams1.read_volatile().maximum_primary_stream_array_size();
++        if max==0||entries as u32>(1u32<<(max+1)){return Err(USBError::NotSupported);}
++        self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.configure_streams(address,entries).await
++    }
++    pub fn stream_place(&mut self,slot:u8,address:u8,stream:u16,words:[u32;4])->Result<(usize,bool,u64)>{self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.stream_place(address,stream,words)}
++    pub fn stream_publish(&mut self,slot:u8,address:u8,stream:u16,index:usize,cycle:bool)->Result<()>{self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.stream_publish(address,stream,index,cycle)}
++
++    pub async fn address_route(&mut self,slot:u8,root_port:u8,speed:u8,route:u32,parent_slot:u8,parent_port:u8,multi_tt:bool,think:u8,bsr:bool)->Result<()> {
++        if !(1..=5).contains(&speed)||route>0xfffff||think>3||root_port==0||root_port>self.port_count(){return Err(USBError::InvalidParameter);}
++        let info=DeviceAddressInfo{root_port_id:root_port,parent_hub:None,port_speed:usb_if::Speed::from_xhci_portsc(speed),port_id:root_port,infos:BTreeMap::new()};
++        let mut device=self.devices.remove(&slot).ok_or(USBError::NotFound)?;
++        let result=device.address_route(&mut self.core,&info,route,parent_slot,parent_port,multi_tt,think,bsr).await;
++        self.devices.insert(slot,device);result
++    }
++    pub async fn configure_hub(&mut self,slot:u8,root:u8,ports:u8,multi:bool,think:u16)->Result<()> {
++        self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.configure_hub(root,ports,multi,think).await
++    }
++
++    pub fn iso_schedule(&mut self,slot:u8,address:u8,asap:bool,frame:u16)->Result<()> {self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.iso_schedule(address,asap,frame)}
++    pub fn raw_events(&self,since:u64,limit:usize)->Result<alloc::vec::Vec<(u64,[u32;4])>> {
++        let log=self.core.raw_events.lock();
++        if log.front().is_some_and(|(seq,_)|since.saturating_add(1)<*seq) {return Err(USBError::Other(anyhow!("event cursor expired")));}
++        Ok(log.iter().filter(|(seq,_)|*seq>since).take(limit.min(4096)).copied().collect())
++    }
++    pub fn raw_place(&mut self,slot:u8,endpoint:u8,words:[u32;4])->Result<(usize,bool,u64)> {
++        if slot==0 {Ok(self.core.cmd.raw_place(words))} else {self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.raw_place(endpoint,words)}
++    }
++    pub fn raw_publish(&mut self,slot:u8,endpoint:u8,index:usize,cycle:bool)->Result<()> {
++        if slot==0 {self.core.cmd.raw_publish(index,cycle);Ok(())} else {self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.raw_publish(endpoint,index,cycle)}
++    }
 +    /// # Safety
 +    /// MMIO must cover all validated register/extended-capability spans and
 +    /// outlive this owner and its sole event handler. Kernel/DMA resources must
@@ -261,10 +292,10 @@ index 7efe34d..9354d97 100644
              )
          } else {
 diff --git a/usb-host/src/backend/kmod/xhci/cmd.rs b/usb-host/src/backend/kmod/xhci/cmd.rs
-index 27f0aca..183155f 100644
+index 27f0aca..8756cf2 100644
 --- a/usb-host/src/backend/kmod/xhci/cmd.rs
 +++ b/usb-host/src/backend/kmod/xhci/cmd.rs
-@@ -9,7 +9,7 @@ use xhci::{
+@@ -9,12 +9,14 @@ use xhci::{
  };
  
  use super::{reg::XhciRegisters, ring::SendRing};
@@ -273,7 +304,14 @@ index 27f0aca..183155f 100644
  
  #[derive(Clone)]
  pub struct CommandRing(Arc<Mutex<Inner>>);
-@@ -44,6 +44,12 @@ impl CommandRing {
+ 
+ impl CommandRing {
++    pub(crate) fn raw_place(&mut self,words:[u32;4])->(usize,bool,u64) {self.0.lock().ring.raw_place(words)}
++    pub(crate) fn raw_publish(&mut self,index:usize,cycle:bool) {self.0.lock().ring.raw_publish(index,cycle)}
+     pub fn new(
+         direction: crate::osal::DmaDirection,
+         dma: &Kernel,
+@@ -44,6 +46,12 @@ impl CommandRing {
          &mut self,
          trb: command::Allowed,
      ) -> Result<CommandCompletion, TransferError> {
@@ -286,7 +324,7 @@ index 27f0aca..183155f 100644
          let fur = {
              let mut inner = self.0.lock();
              let trb_addr = inner.ring.enque_command(trb);
-@@ -57,14 +63,7 @@ impl CommandRing {
+@@ -57,14 +65,7 @@ impl CommandRing {
              fur
          };
  
@@ -302,7 +340,7 @@ index 27f0aca..183155f 100644
      }
  }
  
-@@ -72,3 +71,13 @@ struct Inner {
+@@ -72,3 +73,13 @@ struct Inner {
      ring: SendRing<CommandCompletion>,
      reg: Arc<RwLock<XhciRegisters>>,
  }
@@ -343,10 +381,89 @@ index 900eaad..ab5ca53 100644
          match self {
              ContextData::Context32(ctx) => ctx.out.dma_addr(),
 diff --git a/usb-host/src/backend/kmod/xhci/device.rs b/usb-host/src/backend/kmod/xhci/device.rs
-index a7996fc..38ddfe3 100644
+index a7996fc..eb5ff20 100644
 --- a/usb-host/src/backend/kmod/xhci/device.rs
 +++ b/usb-host/src/backend/kmod/xhci/device.rs
-@@ -159,30 +159,108 @@ impl Device {
+@@ -39,6 +39,10 @@ use crate::{
+ };
+ 
+ pub struct Device {
++    stream_arrays:BTreeMap<u8,dma_api::DArray<[u64;2]>>,
++    stream_rings:BTreeMap<(u8,u16),super::ring::SendRing<xhci::ring::trb::event::TransferEvent>>,
++
++    topology_override:Option<(u32,u8,u8,bool,u8)>,
+     id: SlotId,
+     ctx: ContextData,
+     desc: DeviceDescriptor,
+@@ -55,6 +59,58 @@ pub struct Device {
+ }
+ 
+ impl Device {
++    pub(crate) fn stream_place(&mut self,address:u8,stream:u16,words:[u32;4])->Result<(usize,bool,u64)> {
++        Ok(self.stream_rings.get_mut(&(address,stream)).ok_or(USBError::NotFound)?.raw_place(words))
++    }
++    pub(crate) fn stream_publish(&mut self,address:u8,stream:u16,index:usize,cycle:bool)->Result<()> {
++        self.stream_rings.get_mut(&(address,stream)).ok_or(USBError::NotFound)?.raw_publish(index,cycle);Ok(())
++    }
++    pub(crate) async fn configure_streams(&mut self,address:u8,entries:u16)->Result<()> {
++        if !matches!(self.port_speed,Speed::SuperSpeed|Speed::SuperSpeedPlus)||self.stream_arrays.contains_key(&address)||entries<4||entries>4096||!entries.is_power_of_two(){return Err(USBError::InvalidParameter);}
++        let desc=self.find_ep_desc_in_current_config(address)?;
++        if desc.transfer_type!=EndpointType::Bulk{return Err(USBError::InvalidParameter);}
++        let dci=desc.dci();
++        let mut array=self.kernel.array_zero_with_align::<[u64;2]>(entries as usize,64,dma_api::DmaDirection::Bidirectional).map_err(|_|USBError::NoMemory)?;
++        for stream in 1..entries {
++            let ring=super::ring::SendRing::new(dma_api::DmaDirection::Bidirectional,&self.kernel)?;
++            // Primary Transfer Ring SCT=1, DCS=1; entry zero remains invalid.
++            array.set(stream as usize,[ring.bus_addr().raw()|3,0]);
++            self.stream_rings.insert((address,stream),ring);
++        }
++        let pointer=array.dma_addr().as_u64();
++        self.stream_arrays.insert(address,array); // Retain before possible command publication.
++        self.explicit_stop_endpoint(address).await?;
++        self.ctx.perper_change();
++        self.ctx.with_input(|input|{
++            input.control_mut().set_drop_context_flag(dci as usize);
++            input.control_mut().set_add_context_flag(dci as usize);
++            let ep=input.device_mut().endpoint_mut(dci as usize);
++            ep.set_max_primary_streams((entries.ilog2()-1)as u8);ep.set_linear_stream_array();
++            // xhci0.9.2 setter retains ordinary-ring alignment; arrays here use64B.
++            ep.set_tr_dequeue_pointer(pointer);ep.clear_dequeue_cycle_state();
++        });
++        mb();
++        self.cmd.cmd_request(command::Allowed::ConfigureEndpoint(*command::ConfigureEndpoint::default().set_slot_id(self.id.into()).set_input_context_pointer(self.ctx.input_bus_addr()))).await?;
++        Ok(())
++    }
++
++    pub(crate) async fn address_route(&mut self,host:&mut Xhci,info:&DeviceAddressInfo,route:u32,parent_slot:u8,parent_port:u8,multi_tt:bool,think:u8,bsr:bool)->Result<()> {
++        self.topology_override=Some((route,parent_slot,parent_port,multi_tt,think));
++        self.prepare_explicit(host,info,bsr).await
++    }
++    pub(crate) async fn configure_hub(&mut self,root:u8,ports:u8,multi_tt:bool,think:u16)->Result<()> {
++        self.update_hub_inner(HubParams{num_ports:ports,multi_tt,tt_think_time_ns:think,parent_hub_slot_id:0,root_hub_port_number:root}).await
++    }
++
++    pub(crate) fn iso_schedule(&mut self,address:u8,asap:bool,frame:u16)->Result<()> {
++        self.explicit_endpoint_mut(address)?.with_raw_mut::<XhciEndpoint,_>(|ep|ep.iso_schedule(asap,frame));Ok(())
++    }
++    pub(crate) fn raw_place(&mut self,address:u8,words:[u32;4])->Result<(usize,bool,u64)> {
++        Ok(self.explicit_endpoint_mut(address)?.with_raw_mut::<XhciEndpoint,_>(|ep|ep.ring.raw_place(words)))
++    }
++    pub(crate) fn raw_publish(&mut self,address:u8,index:usize,cycle:bool)->Result<()> {
++        self.explicit_endpoint_mut(address)?.with_raw_mut::<XhciEndpoint,_>(|ep|ep.ring.raw_publish(index,cycle));Ok(())
++    }
+     pub(crate) async fn new(host: &mut Xhci) -> Result<Self> {
+         let slot_id = host.device_slot_assignment().await?;
+         debug!("Slot {slot_id} assigned");
+@@ -71,6 +127,8 @@ impl Device {
+         let desc = unsafe { core::mem::zeroed() };
+ 
+         Ok(Self {
++            stream_arrays:BTreeMap::new(),stream_rings:BTreeMap::new(),
++            topology_override:None,
+             id: slot_id,
+             ctx,
+             bell,
+@@ -159,30 +217,108 @@ impl Device {
          Ok(())
      }
  
@@ -380,8 +497,8 @@ index a7996fc..38ddfe3 100644
          self.evaluate().await?;
 -
 +        self.control_endpoint_mut().set_packet_size(packet_size);
-         Ok(())
-     }
++        Ok(())
++    }
 +    pub(crate) async fn explicit_descriptor(&mut self,kind:u8,index:u8,language:u16,length:u16)->Result<Vec<u8>> {
 +        if length==0 {return Err(usb_if::err::USBError::InvalidParameter);}
 +        let mut bytes=vec![0u8;length as usize];
@@ -397,8 +514,8 @@ index a7996fc..38ddfe3 100644
 +    pub(crate) async fn explicit_interface(&mut self,interface:u8,alternate:u8)->Result<()> {
 +        if self.ep_interfaces.values().any(|number|*number==interface) {return Err(usb_if::err::USBError::InvalidParameter);}
 +        self.control_endpoint_mut().control_out(ControlSetup {request_type:RequestType::Standard,recipient:Recipient::Interface,request:usb_if::transfer::Request::SetInterface,value:alternate as u16,index:interface as u16},&[]).await?;
-+        Ok(())
-+    }
+         Ok(())
+     }
 +    pub(crate) async fn explicit_endpoints(&mut self,interface:u8,alternate:u8,bytes:&[u8])->Result<Vec<usb_if::endpoint::EndpointInfo>> {
 +        let config=ConfigurationDescriptor::parse(bytes).ok_or(usb_if::err::USBError::InvalidParameter)?;
 +        if Some(config.configuration_value)!=self.current_config_value || self.ep_interfaces.values().any(|number|*number==interface) {return Err(usb_if::err::USBError::InvalidParameter);}
@@ -471,7 +588,7 @@ index a7996fc..38ddfe3 100644
          // 直接使用 DeviceSpeed 枚举计算默认 max packet size
          let max_packet_size = parse_default_max_packet_size_from_port_speed(info.port_speed);
  
-@@ -204,9 +282,10 @@ impl Device {
+@@ -204,9 +340,10 @@ impl Device {
              parent_id = parent_hub.parent;
          }
  
@@ -484,7 +601,7 @@ index a7996fc..38ddfe3 100644
          // ctrl dci
          let dci = Dci::CTRL;
          // 1. Allocate an Input Context data structure (6.2.5) and initialize all fields to
-@@ -287,16 +366,11 @@ impl Device {
+@@ -287,16 +424,11 @@ impl Device {
              endpoint_0.set_max_packet_size(max_packet_size);
              // • Max Burst Size = 0.
              endpoint_0.set_max_burst_size(0);
@@ -506,7 +623,13 @@ index a7996fc..38ddfe3 100644
              // • Interval = 0.
              endpoint_0.set_interval(0);
              // • Max Primary Streams (MaxPStreams) = 0.
-@@ -329,11 +403,7 @@ impl Device {
+@@ -326,14 +458,13 @@ impl Device {
+ 
+         mb();
+ 
++        if let Some((route,parent_slot,parent_port,multi_tt,think))=self.topology_override.take() {
++            self.ctx.with_input(|input|{let slot=input.device_mut().slot_mut();slot.set_route_string(route);slot.set_parent_hub_slot_id(parent_slot);slot.set_parent_port_number(parent_port);slot.set_tt_think_time(think);if multi_tt{slot.set_multi_tt();}else{slot.clear_multi_tt();}});
++        }
          let input_bus_addr = self.ctx.input_bus_addr();
          trace!("Input context bus address: {input_bus_addr:#x?}");
          let result = host
@@ -519,7 +642,7 @@ index a7996fc..38ddfe3 100644
              .await?;
  
          debug!("Address slot ok {result:x?}");
-@@ -348,12 +418,10 @@ impl Device {
+@@ -348,12 +479,10 @@ impl Device {
      async fn get_device_descriptor_base(&mut self) -> Result<DeviceDescriptorBase> {
          let mut data = vec![0u8; 8];
  
@@ -536,7 +659,7 @@ index a7996fc..38ddfe3 100644
  
          Ok(desc)
      }
-@@ -528,7 +596,7 @@ impl Device {
+@@ -528,7 +657,7 @@ impl Device {
              input
                  .device_mut()
                  .slot_mut()
@@ -545,7 +668,7 @@ index a7996fc..38ddfe3 100644
          });
          mb();
  
-@@ -765,3 +833,90 @@ impl DeviceOp for Device {
+@@ -765,3 +894,90 @@ impl DeviceOp for Device {
          self.update_hub_inner(params).boxed()
      }
  }
@@ -637,7 +760,7 @@ index a7996fc..38ddfe3 100644
 +}
 +#[cfg(test)]mod dequeue_alignment{use super::*;#[test]fn trb_alignment_and_cycle_are_preserved(){assert_eq!(explicit_endpoint_dequeue_words(0x123400010030,true).unwrap(),[0x10031,0x1234]);assert_eq!(explicit_endpoint_dequeue_words(0x10030,false).unwrap(),[0x10030,0]);assert!(explicit_endpoint_dequeue_words(0x10031,false).is_err());}}
 diff --git a/usb-host/src/backend/kmod/xhci/endpoint.rs b/usb-host/src/backend/kmod/xhci/endpoint.rs
-index 5c11453..b6d1665 100644
+index 5c11453..af70085 100644
 --- a/usb-host/src/backend/kmod/xhci/endpoint.rs
 +++ b/usb-host/src/backend/kmod/xhci/endpoint.rs
 @@ -95,6 +95,10 @@ pub struct Endpoint {
@@ -651,7 +774,15 @@ index 5c11453..b6d1665 100644
      inflight: BTreeMap<EndpointRequestId, SubmittedTd>,
      trb_to_request: BTreeMap<TransferId, EndpointRequestId>,
      outstanding_trbs: usize,
-@@ -121,6 +125,7 @@ impl Endpoint {
+@@ -112,6 +116,7 @@ unsafe impl Sync for Endpoint {}
+ const ENDPOINT_RING_PAGES: usize = 16;
+ 
+ impl Endpoint {
++    pub(crate) fn iso_schedule(&mut self,asap:bool,frame:u16) {self.iso_start_asap=asap;self.next_iso_frame_id=frame&0x7ff;}
+     pub fn new(dci: Dci, kernel: &Kernel, bell: Arc<Mutex<SlotBell>>) -> crate::err::Result<Self> {
+         let ring =
+             SendRing::new_with_pages(ENDPOINT_RING_PAGES, DmaDirection::Bidirectional, kernel)?;
+@@ -121,6 +126,7 @@ impl Endpoint {
              ring,
              bell,
              next_request_id: 1,
@@ -659,7 +790,7 @@ index 5c11453..b6d1665 100644
              inflight: BTreeMap::new(),
              trb_to_request: BTreeMap::new(),
              outstanding_trbs: 0,
-@@ -133,6 +138,32 @@ impl Endpoint {
+@@ -133,6 +139,32 @@ impl Endpoint {
          })
      }
  
@@ -692,7 +823,7 @@ index 5c11453..b6d1665 100644
      pub fn configure_periodic(
          &mut self,
          max_packet_size: usize,
-@@ -145,6 +176,11 @@ impl Endpoint {
+@@ -145,6 +177,11 @@ impl Endpoint {
          self.iso_start_asap = true;
      }
  
@@ -704,7 +835,7 @@ index 5c11453..b6d1665 100644
      pub fn bus_addr(&self) -> BusAddr {
          self.ring.bus_addr()
      }
-@@ -215,12 +251,7 @@ impl Endpoint {
+@@ -215,12 +252,7 @@ impl Endpoint {
          Ok(())
      }
  
@@ -718,7 +849,7 @@ index 5c11453..b6d1665 100644
          let submitted = self.inflight.remove(&request_id).ok_or_else(|| {
              warn!(
                  "xhci: completion for missing request dci={} request_id={} event_trb={:#x}",
-@@ -230,6 +261,7 @@ impl Endpoint {
+@@ -230,6 +262,7 @@ impl Endpoint {
              );
              TransferError::InvalidEndpoint
          })?;
@@ -726,7 +857,7 @@ index 5c11453..b6d1665 100644
          self.outstanding_trbs = self.outstanding_trbs.saturating_sub(submitted.trb_count);
          match &submitted.kind {
              SubmittedTdKind::Normal { completion_trb } => {
-@@ -247,6 +279,16 @@ impl Endpoint {
+@@ -247,6 +280,16 @@ impl Endpoint {
              }
          }
  
@@ -743,7 +874,7 @@ index 5c11453..b6d1665 100644
          if submitted.cancelled {
              return Err(TransferError::Cancelled);
          }
-@@ -303,7 +345,7 @@ impl Endpoint {
+@@ -303,7 +346,7 @@ impl Endpoint {
              }
              SubmittedTdKind::Normal { .. } => {
                  let remaining = event.trb_transfer_length() as usize;
@@ -752,7 +883,7 @@ index 5c11453..b6d1665 100644
              }
              SubmittedTdKind::Iso { .. } => unreachable!("ISO was handled above"),
          };
-@@ -327,6 +369,11 @@ impl Endpoint {
+@@ -327,6 +370,11 @@ impl Endpoint {
                  continue;
              };
              let remaining = event.trb_transfer_length() as usize;
@@ -764,7 +895,7 @@ index 5c11453..b6d1665 100644
              if let Some(submitted) = self.inflight.get_mut(&request_id)
                  && let SubmittedTdKind::Control(control_td) = &mut submitted.kind
              {
-@@ -334,7 +381,7 @@ impl Endpoint {
+@@ -334,7 +382,7 @@ impl Endpoint {
                      ControlStage::Setup => {}
                      ControlStage::Data => {
                          control_td.actual =
@@ -773,7 +904,7 @@ index 5c11453..b6d1665 100644
                      }
                      ControlStage::Status if control_td.actual.is_none() => {
                          control_td.actual = Some(control_td.requested);
-@@ -597,10 +644,13 @@ impl Endpoint {
+@@ -597,10 +645,13 @@ impl Endpoint {
  
  impl EndpointOp for Endpoint {
      fn submit_request(&mut self, request: TransferRequest) -> Result<RequestId, TransferError> {
@@ -789,7 +920,7 @@ index 5c11453..b6d1665 100644
  
          let mut data_bus_addr = 0;
          if transfer.buffer_len() > 0 {
-@@ -608,10 +658,10 @@ impl EndpointOp for Endpoint {
+@@ -608,10 +659,10 @@ impl EndpointOp for Endpoint {
                  transfer.confirm_write_all();
              }
              data_bus_addr = transfer.dma_addr();
@@ -803,7 +934,7 @@ index 5c11453..b6d1665 100644
                      data_bus_addr,
                      buffer_end,
                      self.kernel.dma_mask()
-@@ -642,30 +692,34 @@ impl EndpointOp for Endpoint {
+@@ -642,30 +693,34 @@ impl EndpointOp for Endpoint {
  
                  let mut data = None;
  
@@ -847,7 +978,7 @@ index 5c11453..b6d1665 100644
  
                  let has_data_stage = data.is_some();
                  let mut control_trbs: Vec<transfer::Allowed> = vec![setup.into()];
-@@ -882,3 +936,67 @@ impl EndpointDescriptorExt for EndpointDescriptor {
+@@ -882,3 +937,67 @@ impl EndpointDescriptorExt for EndpointDescriptor {
          }
      }
  }
@@ -916,19 +1047,40 @@ index 5c11453..b6d1665 100644
 + }
 +}
 diff --git a/usb-host/src/backend/kmod/xhci/event.rs b/usb-host/src/backend/kmod/xhci/event.rs
-index 27eeae2..f31f85e 100644
+index 27eeae2..c24c741 100644
 --- a/usb-host/src/backend/kmod/xhci/event.rs
 +++ b/usb-host/src/backend/kmod/xhci/event.rs
-@@ -60,7 +60,7 @@ impl EventRing {
+@@ -2,6 +2,7 @@ use alloc::vec::Vec;
+ 
+ use dma_api::{DArray, DmaDirection};
+ use mbarrier::mb;
++#[cfg(test)]
+ use xhci::ring::trb::event::Allowed;
+ 
+ use super::ring::{Ring, TRBS_PER_SEGMENT};
+@@ -28,6 +29,10 @@ unsafe impl Sync for EventRing {}
+ const EVENT_RING_SEGMENTS: usize = 2;
+ 
+ impl EventRing {
++    pub(crate) fn next_raw(&mut self)->Option<[u32;4]> {
++        let words=self.current_data()?.to_raw();
++        mb();self.inc_deque();Some(words)
++    }
+     pub fn new(max_segments: usize, dma: &Kernel) -> Result<Self> {
+         let segment_count = EVENT_RING_SEGMENTS.min(max_segments.max(1));
+         let mut segments = Vec::with_capacity(segment_count);
+@@ -59,8 +64,9 @@ impl EventRing {
+         })
      }
  
++    #[cfg(test)]
      pub fn next(&mut self) -> Option<Allowed> {
 -        let data = self.current_data();
 +        let data = self.current_data()?;
  
          let allowed = Allowed::try_from(data.to_raw()).ok()?;
  
-@@ -73,11 +73,7 @@ impl EventRing {
+@@ -73,11 +79,7 @@ impl EventRing {
      }
  
      pub fn has_pending_event(&mut self) -> bool {
@@ -941,7 +1093,7 @@ index 27eeae2..f31f85e 100644
      }
  
      pub fn erdp(&self) -> u64 {
-@@ -112,11 +108,22 @@ impl EventRing {
+@@ -112,11 +114,22 @@ impl EventRing {
          &self.segments[self.segment_index]
      }
  
@@ -969,7 +1121,7 @@ index 27eeae2..f31f85e 100644
      }
  
      fn inc_deque(&mut self) {
-@@ -137,3 +144,63 @@ pub struct EventRingInfo {
+@@ -137,3 +150,84 @@ pub struct EventRingInfo {
      pub erdp: u64,
      pub erstba: u64,
  }
@@ -997,6 +1149,27 @@ index 27eeae2..f31f85e 100644
 +    }
 +    impl KernelOp for Memory {fn delay(&self,_:Duration) {}}
 +    pub(crate) static MEMORY:Memory=Memory;
++    #[test]
++    fn literal_placement_preserves_fields_and_defers_ownership() {
++        let kernel=Kernel::new(u64::MAX,&MEMORY);
++        let mut ring=super::super::ring::SendRing::<()>::new(DmaDirection::Bidirectional,&kernel).unwrap();
++        let words=[0x12345678,0x87654321,0xfedcba98,(63<<10)|0x80000020];
++        let (index,cycle,address)=ring.raw_place(words);
++        let read=||{let mut raw=[0;4];for i in 0..4{raw[i]=unsafe{(address as *const u32).add(i).read_volatile()};}raw};
++        let before=read();assert_eq!(&before[..3],&words[..3]);assert_eq!(before[3]&!1,words[3]&!1);assert_ne!(before[3]&1!=0,cycle);
++        ring.raw_publish(index,cycle);let after=read();assert_eq!(&after[..3],&words[..3]);assert_eq!(after[3]&!1,words[3]&!1);assert_eq!(after[3]&1!=0,cycle);
++    }
++    #[test]
++    fn unknown_event_advances_before_typed_dispatch() {
++        let kernel=Kernel::new(u64::MAX,&MEMORY);
++        let mut ring=EventRing::new(2,&kernel).unwrap();
++        let unknown=[0x1234,0x5678,0xabcdef01,(63<<10)|1];
++        ring.segments[0].trbs.set(0,super::super::ring::TrbData(unknown));
++        ring.segments[0].trbs.set(1,super::super::ring::TrbData([0,0,1<<24,(33<<10)|1]));
++        assert_eq!(ring.next_raw(),Some(unknown));
++        assert_eq!(ring.next_raw().unwrap()[3]>>10,33);
++        assert!(ring.next_raw().is_none());
++    }
 +    #[test]
 +    fn event_cycle_is_checked_before_consumption_and_wraps() {
 +        let kernel=Kernel::new(u64::MAX,&MEMORY);
@@ -1034,10 +1207,37 @@ index 27eeae2..f31f85e 100644
 +
 +}
 diff --git a/usb-host/src/backend/kmod/xhci/host.rs b/usb-host/src/backend/kmod/xhci/host.rs
-index 243859e..263b3cd 100644
+index 243859e..7000b26 100644
 --- a/usb-host/src/backend/kmod/xhci/host.rs
 +++ b/usb-host/src/backend/kmod/xhci/host.rs
-@@ -141,7 +141,8 @@ impl Xhci {
+@@ -34,6 +34,7 @@ use crate::{
+ };
+ 
+ pub struct Xhci {
++    pub(crate) raw_events:Arc<spin::Mutex<alloc::collections::VecDeque<(u64,[u32;4])>>>,
+     pub(crate) reg: Arc<RwLock<XhciRegisters>>,
+     pub(crate) kernel: Kernel,
+     pub(crate) cmd: CommandRing,
+@@ -121,8 +122,10 @@ impl Xhci {
+ 
+         let transfer_result_handler = TransferResultHandler::new(reg_shared.clone());
+         let ports = root_hub.waker();
++        let raw_events=Arc::new(spin::Mutex::new(alloc::collections::VecDeque::new()));
+ 
+         Ok(Xhci {
++            raw_events:raw_events.clone(),
+             reg: reg_shared,
+             kernel,
+             cmd,
+@@ -134,6 +137,7 @@ impl Xhci {
+                 event_ring,
+                 transfer_result_handler,
+                 ports,
++                raw_events,
+             )),
+             root_hub: Some(root_hub),
+             event_ring_info,
+@@ -141,7 +145,8 @@ impl Xhci {
          })
      }
  
@@ -1047,7 +1247,7 @@ index 243859e..263b3cd 100644
          self.disable_irq();
          // 4.2 Host Controller Initialization
          self.init_ext_caps().await?;
-@@ -151,6 +152,9 @@ impl Xhci {
+@@ -151,6 +156,9 @@ impl Xhci {
          self.chip_hardware_reset().await?;
  
          self.disable_irq();
@@ -1057,6 +1257,41 @@ index 243859e..263b3cd 100644
  
          // Program the Max Device Slots Enabled (MaxSlotsEn) field in the CONFIG
          // register (5.4.7) to enable the device slots that system software is going to
+@@ -520,6 +528,7 @@ impl Xhci {
+ }
+ 
+ pub struct EventHandler {
++    raw_events:Arc<spin::Mutex<alloc::collections::VecDeque<(u64,[u32;4])>>>,
+     reg: UnsafeCell<XhciRegisters>,
+     cmd_finished: Finished<CommandCompletion>,
+     event_ring: UnsafeCell<EventRing>,
+@@ -537,8 +546,10 @@ impl EventHandler {
+         event_ring: EventRing,
+         transfer_result_handler: TransferResultHandler,
+         ports: PortChangeWaker,
++        raw_events:Arc<spin::Mutex<alloc::collections::VecDeque<(u64,[u32;4])>>>,
+     ) -> Self {
+         Self {
++            raw_events,
+             reg: UnsafeCell::new(reg),
+             cmd_finished,
+             event_ring: UnsafeCell::new(event_ring),
+@@ -584,7 +595,14 @@ impl EventHandler {
+         let mut other_events = 0usize;
+         let mut event_loop = 0usize;
+ 
+-        while let Some(allowed) = self.event_ring().next() {
++        while let Some(words) = self.event_ring().next_raw() {
++            {
++                let mut log=self.raw_events.lock();
++                let sequence=log.back().map_or(1,|(seq,_)|seq+1);
++                if log.len()>=65536 {log.pop_front();}
++                log.push_back((sequence,words));
++            }
++            let Ok(allowed)=Allowed::try_from(words) else {other_events+=1;continue;};
+             match allowed {
+                 Allowed::CommandCompletion(c) => {
+                     command_events += 1;
 diff --git a/usb-host/src/backend/kmod/xhci/mod.rs b/usb-host/src/backend/kmod/xhci/mod.rs
 index 8c82dc7..0a1169d 100644
 --- a/usb-host/src/backend/kmod/xhci/mod.rs
@@ -1114,7 +1349,7 @@ index 9eb9bc8..e3a49d0 100644
      fn drop(&mut self) {
          if self.enable {
 diff --git a/usb-host/src/backend/kmod/xhci/ring.rs b/usb-host/src/backend/kmod/xhci/ring.rs
-index 4c44966..24a4372 100644
+index 4c44966..f02ba87 100644
 --- a/usb-host/src/backend/kmod/xhci/ring.rs
 +++ b/usb-host/src/backend/kmod/xhci/ring.rs
 @@ -18,7 +18,7 @@ const DEFAULT_RING_PAGES: usize = 2;
@@ -1162,10 +1397,22 @@ index 4c44966..24a4372 100644
  
              self.cycle = !self.cycle;
          } else if self.i >= len {
-@@ -190,6 +203,7 @@ pub struct SendRing<R> {
+@@ -190,6 +203,19 @@ pub struct SendRing<R> {
  }
  
  impl<R> SendRing<R> {
++    pub(crate) fn raw_place(&mut self, mut words:[u32;4])->(usize,bool,u64) {
++        let index=self.ring.i;let cycle=self.ring.cycle;
++        words[3]=(words[3]&!1)|u32::from(!cycle);
++        let addr=self.ring.enque_trb(TrbData(words));
++        self.finished.clear_finished(addr);
++        (index,cycle,addr.raw())
++    }
++    pub(crate) fn raw_publish(&mut self,index:usize,cycle:bool) {
++        let mut words=unsafe {self.ring.trbs.as_ptr().as_ptr().add(index).read_volatile()}.to_raw();
++        words[3]=(words[3]&!1)|u32::from(cycle);
++        self.ring.write_trb(index,TrbData(words));
++    }
 +    pub(crate) fn producer_position(&self)->(BusAddr,bool){(self.ring.trb_bus_addr(self.ring.i),self.ring.cycle)}
      pub fn new(direction: DmaDirection, dma: &Kernel) -> Result<Self> {
          let ring = Ring::new(true, direction, dma)?;

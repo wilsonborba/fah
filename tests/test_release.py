@@ -113,14 +113,15 @@ class EvidenceGate(unittest.TestCase):
     def test_candidate_refuses_stale_binary_commit_or_incomplete_suite_set(self):
         with tempfile.TemporaryDirectory()as directory:
             paths=[]
-            for index,suite in enumerate(['feasibility','fixture','smoke','smoke','explicit','faults']):
+            for index,suite in enumerate(['feasibility','fixture','smoke','smoke','explicit','faults','m8']):
                 path=pathlib.Path(directory)/str(index);path.mkdir();paths.append(path)
                 (path/'.fah-lab-run').touch()
                 (path/'result.json').write_text(json.dumps(dict(success=True,qemu_exit=0,suite=suite)))
                 (path/'manifest.json').write_text(json.dumps(dict(commit='rev',sources={str(ROOT/'target/release/fah'):'bin'})))
                 if suite=='explicit':(path/'trace-validation.json').write_text(json.dumps([dict(phase=name,verified=True)for name in sorted(release.TRACE_PHASES)]))
                 if suite=='faults':(path/'failure-matrix.json').write_text(json.dumps([dict(name=name,verified=True)for name in sorted(release.FAULT_CASES)]))
-            self.assertEqual(len(release.verified_runs(paths,'rev','bin')),6)
+                if suite=='m8':(path/'m8-validation.json').write_text(json.dumps(dict(verified=True,independent_trace=True,cases=[dict(name=name,verified=True)for name in release.RELEASE_CONTEXT.M8_CASES])))
+            self.assertEqual(len(release.verified_runs(paths,'rev','bin')),7)
             for candidates,commit,binary in [(paths,'old','bin'),(paths,'rev','changed'),(paths[:-1],'rev','bin')]:
                 with self.assertRaises(ValueError):release.verified_runs(candidates,commit,binary)
             with self.assertRaises(ValueError):release.verified_runs(paths+[paths[0]],'rev','bin')
@@ -223,6 +224,38 @@ class CandidateSourceGate(SourceTrees):
         with mock.patch.object(release,'ROOT',fixture.root),mock.patch.dict(os.environ,{'RUSTUP_TOOLCHAIN':'stable'}),mock.patch.object(subprocess,'run',without_cargo(REAL_RUN)):
             sources=release.verified_sources()
             with self.assertRaisesRegex(ValueError,'pinned 1.91.1 toolchain'):release.build(sources)
+
+
+class ReleaseVersionPolicy(unittest.TestCase):
+    def test_matching_current_future_and_prerelease_versions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for version in ('0.1.0', '0.2.0', '1.0.0-rc.1', '1.0.0+build.7'):
+                with self.subTest(version=version):
+                    (root / 'Cargo.toml').write_text(f'[package]\nversion = "{version}"\n')
+                    with mock.patch.object(release, 'ROOT', root), mock.patch.object(release, 'command', side_effect=['release/v' + version, '']) as command:
+                        self.assertEqual(release.clean_release(), version)
+                    self.assertEqual(command.call_args_list, [mock.call('git', '-C', str(root), 'branch', '--show-current'), mock.call('git', '-C', str(root), 'status', '--porcelain')])
+
+    def test_wrong_nonrelease_detached_and_dirty_branches_cannot_build(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / 'Cargo.toml').write_text('[package]\nversion = "0.2.0"\n')
+            for branch, status in [('release/v0.1.0', ''), ('feature/main', ''), ('', ''), ('release/v0.2.0', ' M Cargo.toml')]:
+                with self.subTest(branch=branch, status=status), mock.patch.object(release, 'ROOT', root), mock.patch.object(release, 'command', side_effect=[branch, status]), mock.patch.object(release, 'build') as build:
+                    with self.assertRaisesRegex(ValueError, 'release/v0.2.0'):
+                        release.package(root / 'out', [], {}, [], {})
+                    build.assert_not_called()
+                    self.assertFalse((root / 'out').exists())
+
+    def test_version_must_be_an_explicit_nonempty_string(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for value in ('""', '" 0.2.0 "', '42', '{ workspace = true }'):
+                with self.subTest(value=value):
+                    (root / 'Cargo.toml').write_text('[package]\nversion = ' + value + '\n')
+                    with self.assertRaisesRegex(ValueError, 'package.version'):
+                        release.RELEASE_CONTEXT.package_version(root)
 
 
 if __name__=='__main__':unittest.main()

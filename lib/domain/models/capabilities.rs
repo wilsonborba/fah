@@ -31,7 +31,21 @@ pub struct Capability {
 }
 pub const SPECIFICATION: &str = "https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/extensible-host-controler-interface-usb-xhci.pdf";
 pub fn registry() -> Vec<Capability> {
-    vec![
+    let mut rows = vec![
+        Capability {
+            operation: "literal_owner_operations",
+            commands: &["raw", "iso_packets"],
+            availability: Availability::Implemented,
+            boundary: Boundary::LibraryProfile,
+            evidence: &["compiled"],
+            precondition: "initialized emulated owner; action-specific handles and bounds",
+            effect: "explicit DMA, literal TRB placement/publication, MMIO, doorbells and acknowledged single-consumer drain",
+            specification: "xHCI4.9,4.17,5,6.4",
+            implementation: "lib/dal/local/controller_raw.rs",
+            validation: &["tests/raw_contract.rs", "tests/events.rs", "tests/dma.rs"],
+            runs: &[],
+            limits: "unknown raw effects invalidate managed state and retain raw DMA until coordinated close; literal ring reservations bounded per session",
+        },
         Capability {
             operation: "metadata_queries",
             commands: &["help", "version", "capabilities"],
@@ -592,7 +606,55 @@ pub fn registry() -> Vec<Capability> {
             boundary: Boundary::DeviceDependent,
             evidence: &["unresolved"],
         },
-    ]
+    ];
+    for row in &mut rows {
+        if matches!(
+            row.operation,
+            "split_control_transaction" | "raw_pointer_ring_mutation"
+        ) {
+            row.availability = Availability::Implemented;
+            row.commands = &["raw"];
+            row.implementation = "lib/dal/local/controller_raw.rs";
+            row.evidence = &["compiled", "fake_tested"];
+            row.precondition =
+                "initialized emulated owner; explicit raw DMA and publication tokens";
+            row.effect = "literal TRB composition, partial or complete explicit publication through the existing owner";
+            row.limits = "experimental bus behavior is not guaranteed; unknown references retained until close; conventional full-stage profile remains available";
+        }
+    }
+    for (operation, effect) in [
+        (
+            "isochronous",
+            "owned packet arrays and explicit ASAP/FrameID scheduling",
+        ),
+        (
+            "bulk_streams",
+            "capability-checked primary stream arrays and owned per-stream rings",
+        ),
+        (
+            "hub_topology",
+            "explicit hub context and downstream route/TT addressing",
+        ),
+        (
+            "scatter_gather",
+            "multi-buffer chained TDs split at64KiB addressed boundaries",
+        ),
+        (
+            "protocol_inspection",
+            "read-only capability, SupportedProtocol and PSI inspection",
+        ),
+        (
+            "explicit_event_drain",
+            "acknowledged drain without IRQ and retained verbatim event cursor",
+        ),
+        (
+            "ordering_controls",
+            "explicit barriers, doorbells, MFINDEX and interrupt moderation",
+        ),
+    ] {
+        rows.push(Capability{operation,commands:&["raw"],availability:Availability::Implemented,boundary:Boundary::DeviceDependent,evidence:&["compiled","fake_tested"],precondition:"initialized emulated owner and operation-specific controller/device support",effect,specification:SPECIFICATION,implementation:"lib/dal/local/controller_raw.rs",validation:&["tests/raw_contract.rs","tests/events.rs"],runs:&[],limits:"see release evidence for guest coverage; physical and fixture-dependent branches remain unproven"});
+    }
+    rows
 }
 #[derive(Serialize)]
 pub struct EvidenceRun {
@@ -614,7 +676,7 @@ pub fn report() -> CapabilityReport {
     CapabilityReport {
         schema_version: 1,
         scope: "emulated preview; compiled/fake/guest evidence is not a complete DMA soundness proof",
-        implementation_baseline: "4f0f03a",
+        implementation_baseline: "feature/main",
         physical_validated: false,
         capabilities: registry(),
         runs: vec![

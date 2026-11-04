@@ -481,7 +481,7 @@ fn validate_selected_endpoints(
         }
         if kind == 5 && selected {
             let transfer_type = bytes[offset + 3] & 3;
-            if transfer_type == 1 || (speed == 2 && transfer_type == 2) {
+            if speed == 2 && matches!(transfer_type, 1 | 2) {
                 return Err(OperationError {
                     category: ErrorCategory::Unsupported,
                     message: "endpoint transfer type unavailable for this speed/profile".into(),

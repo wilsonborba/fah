@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location('fah_guest', ROOT / 'scripts/lab/guest.py')
+spec = importlib.util.spec_from_file_location('fah_guest', ROOT / 'tests/lab/guest.py')
 guest = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guest)
 
@@ -53,15 +53,24 @@ class GuestMetadata(unittest.TestCase):
                 self.run_probe(index, error)
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-host_spec = importlib.util.spec_from_file_location('fah_lab', ROOT / 'scripts/lab.py')
+host_spec = importlib.util.spec_from_file_location('fah_lab', ROOT / 'tests/lab/lab.py')
 lab = importlib.util.module_from_spec(host_spec)
 host_spec.loader.exec_module(lab)
 
 
 class LabGuards(unittest.TestCase):
+    def test_release_branch_matches_the_manifest_version_and_requires_clean_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / 'Cargo.toml').write_text('[package]\nversion = "0.2.0-rc.1"\n')
+            with patch.object(lab, 'ROOT', root):
+                with patch.object(lab, 'command', side_effect=['release/v0.2.0-rc.1', '']):
+                    self.assertEqual(lab.release_only(), '0.2.0-rc.1')
+                for branch, status in [('release/v0.1.0', ''), ('feature/main', ''), ('', ''), ('release/v0.2.0-rc.1', ' M tracked')]:
+                    with self.subTest(branch=branch, status=status), patch.object(lab, 'command', side_effect=[branch, status]):
+                        with self.assertRaisesRegex(ValueError, 'release/v0.2.0-rc.1'):
+                            lab.release_only()
+
     def test_branch_and_tmpfs_guards(self):
         with patch.object(lab, 'command', return_value='feature/not-release'):
             with self.assertRaises(ValueError):
@@ -121,9 +130,9 @@ class LabGuards(unittest.TestCase):
         release_spec.loader.exec_module(release)
         self.assertEqual((lab.DEFAULT_LAB, lab.EVIDENCE, release.OUTPUT), (ROOT / 'target/fah-lab', ROOT / 'docs/evidence', ROOT / 'target/fah-release'))
         for path in (lab.DEFAULT_LAB, lab.EVIDENCE, release.OUTPUT):
-            # Ignored outputs keep release_only() clean, and nothing generated lives in scripts/ (#62).
+            # Ignored outputs keep release_only() clean, and nothing generated lives in scripts/ or tests/ (#62, #64).
             subprocess.run(['git', '-C', str(ROOT), 'check-ignore', '-q', str(path / 'probe')], check=True)
-            self.assertFalse(path.is_relative_to(ROOT / 'scripts'))
+            self.assertFalse(any(path.is_relative_to(ROOT / folder) for folder in ('scripts', 'tests')))
         self.assertFalse(lab.EVIDENCE.is_relative_to(ROOT / 'target'))  # cargo clean must not delete evidence
         self.assertFalse(release.OUTPUT.is_relative_to(ROOT / 'target/release'))  # the clean candidate build removes it (#63)
 
@@ -195,3 +204,7 @@ class KernelInputRoot(unittest.TestCase):
             self.assertEqual(lab.kernel_inputs(root,expected),(kernel,config))
             config.write_bytes(b'changed')
             with self.assertRaisesRegex(AssertionError,'config checksum'):lab.kernel_inputs(root,expected)
+
+
+if __name__ == '__main__':
+    unittest.main()

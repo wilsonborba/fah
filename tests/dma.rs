@@ -51,6 +51,26 @@ fn adapter(f: Fake) -> DmaAdapter<Fake> {
     DmaAdapter::new(f, &[(4096, 0xffffff)], u32::MAX as u64, 4096).unwrap()
 }
 #[test]
+fn raw_dma_above_64k_is_bounded_and_retained_until_proven_release() {
+    let f = Fake::default();
+    let a = adapter(f.clone());
+    let lease = a.raw_allocate(131072, 4096).unwrap();
+    a.raw_write(lease, 65530, &[1, 2, 3, 4, 5, 6, 7, 8])
+        .unwrap();
+    assert_eq!(
+        a.raw_read(lease, 65530, 8).unwrap(),
+        vec![1, 2, 3, 4, 5, 6, 7, 8]
+    );
+    assert!(a.raw_write(lease, 131072, &[1]).is_err());
+    assert!(a.raw_read(lease, usize::MAX, 8).is_err());
+    a.raw_retire(lease).unwrap();
+    assert_eq!(a.retained_allocations(), 1);
+    // This fake has never published any controller references.
+    unsafe { a.reclaim_lease_after_quiescence(lease) }.unwrap();
+    assert!(a.raw_read(lease, 0, 1).is_err());
+    assert!(f.maps.lock().unwrap().is_empty());
+}
+#[test]
 fn retired_storage_stays_mapped_on_unmap_failure() {
     let f = Fake::default();
     let a = adapter(f.clone());

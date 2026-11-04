@@ -4,6 +4,7 @@ import argparse
 import fcntl
 import gzip
 import hashlib
+import importlib.util
 import json
 import lzma
 import os
@@ -17,7 +18,10 @@ import subprocess
 import sys
 import time
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+_release_spec = importlib.util.spec_from_file_location('fah_release_context', ROOT / 'scripts/release_context.py')
+RELEASE_CONTEXT = importlib.util.module_from_spec(_release_spec)
+_release_spec.loader.exec_module(RELEASE_CONTEXT)
 KERNEL = '6.12.95+deb13-amd64'
 MACHINE = 'pc-q35-10.0'
 # Generated VM files and runtime state are build output; completed run evidence is local, untracked documentation.
@@ -34,11 +38,7 @@ def digest(path):
 
 
 def release_only():
-    branch = command('git', '-C', str(ROOT), 'branch', '--show-current')
-    if branch != 'release/v0.1.0':
-        raise ValueError('VM preparation/execution requires release/v0.1.0')
-    if command('git', '-C', str(ROOT), 'status', '--porcelain'):
-        raise ValueError('commit changes before VM preparation/execution')
+    return RELEASE_CONTEXT.require_clean_release(ROOT, command)
 
 
 def safe_lab(path):
@@ -99,7 +99,7 @@ def kernel_inputs(kernel_root,expected):
 def prepare(lab,kernel_root=pathlib.Path('/')):
     release_only()
     kernel_root=kernel_root.expanduser().resolve()
-    expected=json.loads((ROOT/'scripts/lab/kernel.json').read_text())
+    expected=json.loads((ROOT/'tests/lab/kernel.json').read_text())
     kernel,config=kernel_inputs(kernel_root,expected)
     info = inventory(lab)
     info['kernel_input_root']=str(kernel_root)
@@ -169,7 +169,7 @@ def prepare(lab,kernel_root=pathlib.Path('/')):
     if not binary.is_file():
         raise ValueError('build the payload first with the pinned toolchain: cargo clean --release && cargo build --locked --release --features hosted-direct')
     executable(binary,'bin/fah')
-    copy_file(ROOT / 'scripts/lab/guest.py', 'guest.py')
+    copy_file(ROOT / 'tests/lab/guest.py', 'guest.py')
     (stage/'restore-modules.json').write_text(json.dumps(modules[initial_count:]))
     init = '''#!/bin/sh
 export PATH=/bin
@@ -277,6 +277,14 @@ def run(lab, suite, evidence=EVIDENCE):
             result=False
             (run_dir/'trace-validation.json').write_text(json.dumps({'verified':False,'error':str(error)}))
             print(json.dumps({'trace_failure':str(error)}),flush=True)
+    if suite=='m8' and result:
+        rows=[event for event in events if event['kind']=='m8_case']
+        result=RELEASE_CONTEXT.M8_CASES.issubset({row.get('name')for row in rows if row.get('verified')})
+        if result:
+            text=trace_path.read_text()
+            normal_lengths=[int(size,16)&0x1ffff for kind,size in re.findall(r'usb_xhci_fetch_trb addr 0x[0-9a-f]+, ([A-Z_]+), p 0x[0-9a-f]+, s 0x([0-9a-f]+)',text) if kind=='TR_NORMAL']
+            result=any(normal_lengths[i:i+3]==[256,65536,65280]for i in range(len(normal_lengths)))
+        (run_dir/'m8-validation.json').write_text(json.dumps({'verified':result,'cases':rows,'independent_trace':True},indent=2))
     if suite=='faults':
         matrix=[event for event in events if event['kind']=='fault_case']
         (run_dir/'failure-matrix.json').write_text(json.dumps(matrix,indent=2))
@@ -397,7 +405,7 @@ def main():
     parser.add_argument('action', choices=['plan', 'prepare', 'run','stop','cleanup'])
     parser.add_argument('--lab', type=pathlib.Path, default=DEFAULT_LAB)
     parser.add_argument('--kernel-root',type=pathlib.Path,default=pathlib.Path('/'),help='installed / or privately extracted/depmod-prepared Debian guest kernel root')
-    parser.add_argument('--suite', choices=['feasibility','fixture','smoke','explicit','faults'], default='feasibility')
+    parser.add_argument('--suite', choices=['feasibility','fixture','smoke','explicit','faults','m8'], default='feasibility')
     parser.add_argument('--run',help='single generated run directory name for stop/cleanup')
     args = parser.parse_args()
     lab = safe_lab(args.lab)

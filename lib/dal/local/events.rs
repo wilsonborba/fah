@@ -111,6 +111,8 @@ pub enum PumpNotice {
 /// worker is not proof of hardware quiescence. Errors require session recovery.
 pub struct EventPump<D> {
     stop: Arc<EventFd>,
+    control: Arc<EventFd>,
+    drains: mpsc::SyncSender<mpsc::SyncSender<io::Result<()>>>,
     worker: Option<thread::JoinHandle<D>>,
     pub notices: mpsc::Receiver<PumpNotice>,
 }
@@ -118,6 +120,9 @@ impl<D: EventDrain> EventPump<D> {
     pub fn start(mut drain: D, event: Arc<EventFd>) -> io::Result<Self> {
         let stop = Arc::new(EventFd::new(EFD_NONBLOCK | EFD_CLOEXEC)?);
         let thread_stop = stop.clone();
+        let control = Arc::new(EventFd::new(EFD_NONBLOCK | EFD_CLOEXEC)?);
+        let thread_control = control.clone();
+        let (drains, requests) = mpsc::sync_channel::<mpsc::SyncSender<io::Result<()>>>(128);
         let (tx, notices) = mpsc::channel();
         let worker = thread::Builder::new()
             .name("fah-events".into())
@@ -137,9 +142,14 @@ impl<D: EventDrain> EventPump<D> {
                                 events: libc::POLLIN,
                                 revents: 0,
                             },
+                            libc::pollfd {
+                                fd: thread_control.as_raw_fd(),
+                                events: libc::POLLIN,
+                                revents: 0,
+                            },
                         ];
                         // SAFETY: two valid pollfd entries, held fds, blocking wait.
-                        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+                        let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, -1) };
                         if ready < 0 {
                             let err = io::Error::last_os_error();
                             if err.kind() == io::ErrorKind::Interrupted {
@@ -154,6 +164,23 @@ impl<D: EventDrain> EventPump<D> {
                         }
                         if fds[1].revents & libc::POLLIN != 0 {
                             return Ok(());
+                        }
+                        if fds[2].revents & libc::POLLIN != 0 {
+                            let _ = thread_control.read();
+                            while let Ok(ack) = requests.try_recv() {
+                                match drain_available(&mut drain) {
+                                    Ok(()) => {
+                                        let _ = ack.send(Ok(()));
+                                    }
+                                    Err(error) => {
+                                        let _ = ack.send(Err(io::Error::new(
+                                            error.kind(),
+                                            error.to_string(),
+                                        )));
+                                        return Err(error);
+                                    }
+                                }
+                            }
                         }
                         if fds[0].revents & libc::POLLIN != 0 {
                             match event.read() {
@@ -175,9 +202,23 @@ impl<D: EventDrain> EventPump<D> {
             })?;
         Ok(Self {
             stop,
+            control,
+            drains,
             worker: Some(worker),
             notices,
         })
+    }
+    /// Wake the sole consumer even when BEI suppressed every hardware interrupt.
+    /// An acknowledgement proves a completed drain, not controller quiescence.
+    pub fn drain_now(&self, timeout: std::time::Duration) -> io::Result<()> {
+        let (ack, response) = mpsc::sync_channel(1);
+        self.drains
+            .try_send(ack)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        self.control.write(1)?;
+        response
+            .recv_timeout(timeout)
+            .map_err(|e| io::Error::new(io::ErrorKind::TimedOut, e.to_string()))?
     }
     /// Returns the consumer for recovery/teardown; does not assert DMA is stopped.
     pub fn stop(mut self) -> thread::Result<D> {

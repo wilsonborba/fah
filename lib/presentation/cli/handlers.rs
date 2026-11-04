@@ -116,6 +116,10 @@ impl<B: ExplicitBackend> Handler<B> {
     }
     pub fn dispatch(&mut self, command: ShellCommand) -> Result<Value, OperationError> {
         match command {
+            ShellCommand::IsoPackets { request, packets } => Ok(json!(
+                self.usb.submit_request_packets(request, Some(packets))?
+            )),
+            ShellCommand::Raw { request } => self.usb.raw_operation(request),
             ShellCommand::Help => Ok(
                 json!({"input":"JSON Lines or help/version/capabilities/state/init/close/quit","commands":capabilities::command_names(),"effects":{"observe":["state","ports","status","capabilities"],"hardware_steps":["init","port_reset","slot_enable","address","descriptor","configuration","interface","endpoints","submit","control_plan","abort","reset_endpoint"],"logical_only":["logical_cancel"],"polling":["poll","wait"],"release":["close","quit"]},"evidence":"compiled_and_fake_tested; runtime-specific evidence tracked in release report","no_implicit_initialization":true}),
             ),

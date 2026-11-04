@@ -18,8 +18,11 @@ use std::{
 };
 type Adapter = DmaAdapter<VfioMappingProvider>;
 type Pump = EventPump<BoundDrain<crab_usb::EventHandler>>;
+#[path = "controller_raw.rs"]
+mod raw;
 /// Owns the only CrabUSB engine, its consumer, mappings and VFIO lifetime.
 pub struct LocalController {
+    raw: raw::RawOwner,
     run_id: String,
     target: Option<String>,
     resources: Option<GuestResources>,
@@ -38,6 +41,7 @@ pub struct LocalController {
 impl LocalController {
     pub fn new(run_id: String) -> Self {
         Self {
+            raw: Default::default(),
             run_id,
             target: None,
             resources: None,
@@ -509,7 +513,14 @@ fn recovery_error(message: String, code: Option<u32>) -> OperationError {
 }
 impl crate::domain::services::requests::RequestBackend for LocalController {
     fn submit_request(&mut self, request: OwnedRequest) -> Result<u64, OperationError> {
-        self.submit_owned(request, None)
+        self.submit_owned(request, None, None)
+    }
+    fn submit_iso_packets(
+        &mut self,
+        request: OwnedRequest,
+        packets: Vec<usize>,
+    ) -> Result<u64, OperationError> {
+        self.submit_owned(request, None, Some(packets))
     }
     fn poll_request(&mut self, token: u64) -> Result<Option<BackendCompletion>, OperationError> {
         self.check_event_pump()?;
@@ -755,6 +766,12 @@ impl super::teardown::ShutdownBackend for LocalShutdown<'_> {
                 }
             }
             DropDriver => {
+                if let Some(adapter) = owner.adapter {
+                    for lease in owner.raw.leases.values() {
+                        adapter.raw_retire(*lease)?;
+                    }
+                }
+                owner.raw = Default::default();
                 drop(owner.host.take());
                 owner.pending.clear();
                 drop(owner.binding.take());
@@ -869,6 +886,7 @@ impl LocalController {
         &mut self,
         request: OwnedRequest,
         fields: Option<crab_usb::ExplicitControlFields>,
+        iso_packets: Option<Vec<usize>>,
     ) -> Result<u64, OperationError> {
         self.check_event_pump()?;
         let token = self.next_request;
@@ -941,6 +959,15 @@ impl LocalController {
                 direction,
                 buffer: transfer_buffer,
             },
+            TransferType::Isochronous => TransferRequest::Isochronous {
+                direction,
+                buffer: transfer_buffer,
+                packets: iso_packets
+                    .unwrap_or_else(|| vec![metadata.requested_length])
+                    .into_iter()
+                    .map(|length| crab_usb::usb_if::endpoint::IsoPacketRequest { length })
+                    .collect(),
+            },
         };
         let adapter = self
             .adapter
@@ -1004,6 +1031,13 @@ impl LocalController {
 }
 
 impl crate::domain::services::explicit::ExplicitBackend for LocalController {
+    fn raw_operation(
+        &mut self,
+        session: u64,
+        request: crate::domain::models::raw::RawOperation,
+    ) -> Result<serde_json::Value, OperationError> {
+        self.execute_raw(session, request)
+    }
     fn submit_control_plan(
         &mut self,
         plan: crate::domain::models::control_plan::ValidatedControlPlan,
@@ -1026,6 +1060,7 @@ impl crate::domain::services::explicit::ExplicitBackend for LocalController {
                 buffer: plan.buffer,
             },
             Some(fields),
+            None,
         )
     }
     fn noop(&mut self) -> Result<[u32; 4], OperationError> {

@@ -14,6 +14,9 @@ import tarfile
 import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+_release_spec = importlib.util.spec_from_file_location('fah_release_context', ROOT / 'scripts/release_context.py')
+RELEASE_CONTEXT = importlib.util.module_from_spec(_release_spec)
+_release_spec.loader.exec_module(RELEASE_CONTEXT)
 TARGET = 'x86_64-unknown-linux-gnu'
 ALLOWED = {'MIT', 'Apache-2.0', 'BSD-3-Clause', 'Unlicense', 'Unicode-3.0'}
 # The candidate package is generated build output, next to the executable but outside Cargo's profile directories.
@@ -157,16 +160,22 @@ def verified_runs(paths, commit, binary_hash):
             matrix = json.loads((path / 'failure-matrix.json').read_text())
             if len(matrix) != 11 or {row.get('name')for row in matrix}!=FAULT_CASES or not all(row['verified'] for row in matrix):
                 raise ValueError('guest failure matrix incomplete')
+        if result['suite']=='m8':
+            validation=json.loads((path/'m8-validation.json').read_text())
+            cases={row.get('name')for row in validation['cases']if row.get('verified')}
+            if not validation['verified'] or not validation['independent_trace'] or not RELEASE_CONTEXT.M8_CASES.issubset(cases):
+                raise ValueError('M8 guest evidence incomplete')
         runs.append(dict(id=path.name, suite=result['suite'], commit=commit, binary_sha256=binary_hash, _path=path))
     suites = [run['suite'] for run in runs]
+    if tuple(map(int,RELEASE_CONTEXT.package_version(ROOT).split('.')[:2]))>=(0,2) and 'm8'not in suites:
+        raise ValueError('M8 release requires fresh M8 guest evidence')
     if len({run['id'] for run in runs}) != len(runs) or suites.count('smoke') < 2 or not {'feasibility', 'fixture', 'explicit', 'faults'}.issubset(suites):
         raise ValueError('candidate requires distinct fresh feasibility/fixture/smoke/smoke/explicit/faults runs')
     return runs
 
 
 def clean_release():
-    if command('git', 'branch', '--show-current') != 'release/v0.1.0' or command('git', 'status', '--porcelain'):
-        raise ValueError('candidate packaging requires clean release/v0.1.0')
+    return RELEASE_CONTEXT.require_clean_release(ROOT, command)
 
 
 def normalize_tar(info):
@@ -196,10 +205,9 @@ def build(sources):
 
 
 def package(output, evidence, metadata, records, sources):
-    clean_release()
-    version = tomllib.loads((ROOT / 'Cargo.toml').read_text())['package']['version']
-    if version != '0.1.0' or not command('rustc', '--version').startswith(f'rustc {pinned_toolchain()} '):
-        raise ValueError('unexpected release version/toolchain')
+    version = clean_release()
+    if not command('rustc', '--version').startswith(f'rustc {pinned_toolchain()} '):
+        raise ValueError('unexpected release toolchain')
     if pathlib.Path(metadata['target_directory']).resolve() != ROOT / 'target':
         raise ValueError('candidate uses the default target directory shared with the VM recipe')
     build(sources)
