@@ -76,6 +76,19 @@ impl LocalController {
         request: Op,
     ) -> Result<Value, OperationError> {
         match request {
+            Op::IsoSchedule {
+                slot,
+                endpoint,
+                asap,
+                frame_id,
+            } => {
+                self.host
+                    .as_mut()
+                    .ok_or_else(|| OperationError::validation("host unavailable"))?
+                    .iso_schedule(slot, endpoint, asap, frame_id)
+                    .map_err(usb_error)?;
+                Ok(json!({"asap":asap,"frame_id":frame_id,"submitted":false}))
+            }
             Op::Inspect => {
                 let count = self
                     .mapping

@@ -513,7 +513,14 @@ fn recovery_error(message: String, code: Option<u32>) -> OperationError {
 }
 impl crate::domain::services::requests::RequestBackend for LocalController {
     fn submit_request(&mut self, request: OwnedRequest) -> Result<u64, OperationError> {
-        self.submit_owned(request, None)
+        self.submit_owned(request, None, None)
+    }
+    fn submit_iso_packets(
+        &mut self,
+        request: OwnedRequest,
+        packets: Vec<usize>,
+    ) -> Result<u64, OperationError> {
+        self.submit_owned(request, None, Some(packets))
     }
     fn poll_request(&mut self, token: u64) -> Result<Option<BackendCompletion>, OperationError> {
         self.check_event_pump()?;
@@ -879,6 +886,7 @@ impl LocalController {
         &mut self,
         request: OwnedRequest,
         fields: Option<crab_usb::ExplicitControlFields>,
+        iso_packets: Option<Vec<usize>>,
     ) -> Result<u64, OperationError> {
         self.check_event_pump()?;
         let token = self.next_request;
@@ -950,6 +958,15 @@ impl LocalController {
             TransferType::Interrupt => TransferRequest::Interrupt {
                 direction,
                 buffer: transfer_buffer,
+            },
+            TransferType::Isochronous => TransferRequest::Isochronous {
+                direction,
+                buffer: transfer_buffer,
+                packets: iso_packets
+                    .unwrap_or_else(|| vec![metadata.requested_length])
+                    .into_iter()
+                    .map(|length| crab_usb::usb_if::endpoint::IsoPacketRequest { length })
+                    .collect(),
             },
         };
         let adapter = self
@@ -1043,6 +1060,7 @@ impl crate::domain::services::explicit::ExplicitBackend for LocalController {
                 buffer: plan.buffer,
             },
             Some(fields),
+            None,
         )
     }
     fn noop(&mut self) -> Result<[u32; 4], OperationError> {

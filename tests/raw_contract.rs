@@ -44,3 +44,21 @@ fn completion_never_promotes_transfer_only_code_to_command_success() {
     assert_eq!(completion_class(32, 27), CompletionClass::Stopped);
     assert_eq!(completion_class(33, 255), CompletionClass::Unknown);
 }
+
+#[test]
+fn isochronous_requests_have_an_owned_buffer_and_explicit_packet_api() {
+    let spec:fah::domain::models::requests::RequestSpec=serde_json::from_value(serde_json::json!({
+        "device":{"session":1,"generation":1,"slot":1},"endpoint":129,"transfer_type":"isochronous","direction":"in","length":1024,"setup":null
+    })).unwrap();
+    let request = spec.prepare().unwrap();
+    assert_eq!(request.buffer.len(), 1024);
+    assert_eq!(
+        request.metadata.transfer_type,
+        fah::domain::models::requests::TransferType::Isochronous
+    );
+    let command: fah::presentation::cli::commands::ShellCommand=serde_json::from_str(r#"{"op":"raw","request":{"action":"iso_schedule","slot":1,"endpoint":129,"asap":false,"frame_id":2047}}"#).unwrap();
+    assert!(matches!(
+        command,
+        fah::presentation::cli::commands::ShellCommand::Raw { .. }
+    ));
+}
