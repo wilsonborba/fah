@@ -17,6 +17,51 @@ pub enum Ring {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RawOperation {
+    SlotEnable,
+    AddressRoute {
+        slot: u8,
+        root_port: u8,
+        speed: u8,
+        route: u32,
+        #[serde(default)]
+        parent_slot: u8,
+        #[serde(default)]
+        parent_port: u8,
+        #[serde(default)]
+        multi_tt: bool,
+        #[serde(default)]
+        tt_think: u8,
+        #[serde(default)]
+        bsr: bool,
+    },
+    HubConfigure {
+        slot: u8,
+        root_port: u8,
+        ports: u8,
+        #[serde(default)]
+        multi_tt: bool,
+        #[serde(default)]
+        tt_think_ns: u16,
+    },
+    DeviceDescriptor {
+        slot: u8,
+        kind: u8,
+        #[serde(default)]
+        index: u8,
+        #[serde(default)]
+        language: u16,
+        length: u16,
+    },
+    DeviceConfiguration {
+        slot: u8,
+        value: u8,
+    },
+    EndpointConfigure {
+        slot: u8,
+        interface: u8,
+        alternate: u8,
+        configuration: Vec<u8>,
+    },
     IsoSchedule {
         slot: u8,
         endpoint: u8,

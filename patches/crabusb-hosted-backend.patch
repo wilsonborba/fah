@@ -96,10 +96,10 @@ index 71b939e..4ab690c 100644
 -    }
 -}
 diff --git a/usb-host/src/backend/kmod/mod.rs b/usb-host/src/backend/kmod/mod.rs
-index e17466d..39d7340 100644
+index e17466d..da8e51e 100644
 --- a/usb-host/src/backend/kmod/mod.rs
 +++ b/usb-host/src/backend/kmod/mod.rs
-@@ -50,3 +50,157 @@ pub struct DeviceAddressInfo {
+@@ -50,3 +50,168 @@ pub struct DeviceAddressInfo {
      pub port_id: u8,
      pub infos: BTreeMap<Id<Hub>, HubInfo>,
  }
@@ -110,6 +110,17 @@ index e17466d..39d7340 100644
 +pub struct ExplicitHost {pub(crate) core:Xhci, devices:BTreeMap<u8,xhci::Device>}
 +#[cfg(feature = "hosted-direct")]
 +impl ExplicitHost {
++    pub async fn address_route(&mut self,slot:u8,root_port:u8,speed:u8,route:u32,parent_slot:u8,parent_port:u8,multi_tt:bool,think:u8,bsr:bool)->Result<()> {
++        if !(1..=5).contains(&speed)||route>0xfffff||think>3||root_port==0||root_port>self.port_count(){return Err(USBError::InvalidParameter);}
++        let info=DeviceAddressInfo{root_port_id:root_port,parent_hub:None,port_speed:usb_if::Speed::from_xhci_portsc(speed),port_id:root_port,infos:BTreeMap::new()};
++        let mut device=self.devices.remove(&slot).ok_or(USBError::NotFound)?;
++        let result=device.address_route(&mut self.core,&info,route,parent_slot,parent_port,multi_tt,think,bsr).await;
++        self.devices.insert(slot,device);result
++    }
++    pub async fn configure_hub(&mut self,slot:u8,root:u8,ports:u8,multi:bool,think:u16)->Result<()> {
++        self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.configure_hub(root,ports,multi,think).await
++    }
++
 +    pub fn iso_schedule(&mut self,slot:u8,address:u8,asap:bool,frame:u16)->Result<()> {self.devices.get_mut(&slot).ok_or(USBError::NotFound)?.iso_schedule(address,asap,frame)}
 +    pub fn raw_events(&self,since:u64,limit:usize)->Result<alloc::vec::Vec<(u64,[u32;4])>> {
 +        let log=self.core.raw_events.lock();
@@ -362,13 +373,29 @@ index 900eaad..ab5ca53 100644
          match self {
              ContextData::Context32(ctx) => ctx.out.dma_addr(),
 diff --git a/usb-host/src/backend/kmod/xhci/device.rs b/usb-host/src/backend/kmod/xhci/device.rs
-index a7996fc..ccc245c 100644
+index a7996fc..73ebdfe 100644
 --- a/usb-host/src/backend/kmod/xhci/device.rs
 +++ b/usb-host/src/backend/kmod/xhci/device.rs
-@@ -55,6 +55,15 @@ pub struct Device {
+@@ -39,6 +39,7 @@ use crate::{
+ };
+ 
+ pub struct Device {
++    topology_override:Option<(u32,u8,u8,bool,u8)>,
+     id: SlotId,
+     ctx: ContextData,
+     desc: DeviceDescriptor,
+@@ -55,6 +56,23 @@ pub struct Device {
  }
  
  impl Device {
++    pub(crate) async fn address_route(&mut self,host:&mut Xhci,info:&DeviceAddressInfo,route:u32,parent_slot:u8,parent_port:u8,multi_tt:bool,think:u8,bsr:bool)->Result<()> {
++        self.topology_override=Some((route,parent_slot,parent_port,multi_tt,think));
++        self.prepare_explicit(host,info,bsr).await
++    }
++    pub(crate) async fn configure_hub(&mut self,root:u8,ports:u8,multi_tt:bool,think:u16)->Result<()> {
++        self.update_hub_inner(HubParams{num_ports:ports,multi_tt,tt_think_time_ns:think,parent_hub_slot_id:0,root_hub_port_number:root}).await
++    }
++
 +    pub(crate) fn iso_schedule(&mut self,address:u8,asap:bool,frame:u16)->Result<()> {
 +        self.explicit_endpoint_mut(address)?.with_raw_mut::<XhciEndpoint,_>(|ep|ep.iso_schedule(asap,frame));Ok(())
 +    }
@@ -381,7 +408,15 @@ index a7996fc..ccc245c 100644
      pub(crate) async fn new(host: &mut Xhci) -> Result<Self> {
          let slot_id = host.device_slot_assignment().await?;
          debug!("Slot {slot_id} assigned");
-@@ -159,30 +168,108 @@ impl Device {
+@@ -71,6 +89,7 @@ impl Device {
+         let desc = unsafe { core::mem::zeroed() };
+ 
+         Ok(Self {
++            topology_override:None,
+             id: slot_id,
+             ctx,
+             bell,
+@@ -159,30 +178,108 @@ impl Device {
          Ok(())
      }
  
@@ -506,7 +541,7 @@ index a7996fc..ccc245c 100644
          // 直接使用 DeviceSpeed 枚举计算默认 max packet size
          let max_packet_size = parse_default_max_packet_size_from_port_speed(info.port_speed);
  
-@@ -204,9 +291,10 @@ impl Device {
+@@ -204,9 +301,10 @@ impl Device {
              parent_id = parent_hub.parent;
          }
  
@@ -519,7 +554,7 @@ index a7996fc..ccc245c 100644
          // ctrl dci
          let dci = Dci::CTRL;
          // 1. Allocate an Input Context data structure (6.2.5) and initialize all fields to
-@@ -287,16 +375,11 @@ impl Device {
+@@ -287,16 +385,11 @@ impl Device {
              endpoint_0.set_max_packet_size(max_packet_size);
              // • Max Burst Size = 0.
              endpoint_0.set_max_burst_size(0);
@@ -541,7 +576,13 @@ index a7996fc..ccc245c 100644
              // • Interval = 0.
              endpoint_0.set_interval(0);
              // • Max Primary Streams (MaxPStreams) = 0.
-@@ -329,11 +412,7 @@ impl Device {
+@@ -326,14 +419,13 @@ impl Device {
+ 
+         mb();
+ 
++        if let Some((route,parent_slot,parent_port,multi_tt,think))=self.topology_override.take() {
++            self.ctx.with_input(|input|{let slot=input.device_mut().slot_mut();slot.set_route_string(route);slot.set_parent_hub_slot_id(parent_slot);slot.set_parent_port_number(parent_port);slot.set_tt_think_time(think);if multi_tt{slot.set_multi_tt();}else{slot.clear_multi_tt();}});
++        }
          let input_bus_addr = self.ctx.input_bus_addr();
          trace!("Input context bus address: {input_bus_addr:#x?}");
          let result = host
@@ -554,7 +595,7 @@ index a7996fc..ccc245c 100644
              .await?;
  
          debug!("Address slot ok {result:x?}");
-@@ -348,12 +427,10 @@ impl Device {
+@@ -348,12 +440,10 @@ impl Device {
      async fn get_device_descriptor_base(&mut self) -> Result<DeviceDescriptorBase> {
          let mut data = vec![0u8; 8];
  
@@ -571,7 +612,7 @@ index a7996fc..ccc245c 100644
  
          Ok(desc)
      }
-@@ -528,7 +605,7 @@ impl Device {
+@@ -528,7 +618,7 @@ impl Device {
              input
                  .device_mut()
                  .slot_mut()
@@ -580,7 +621,7 @@ index a7996fc..ccc245c 100644
          });
          mb();
  
-@@ -765,3 +842,90 @@ impl DeviceOp for Device {
+@@ -765,3 +855,90 @@ impl DeviceOp for Device {
          self.update_hub_inner(params).boxed()
      }
  }
