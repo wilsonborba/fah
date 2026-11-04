@@ -12,11 +12,28 @@
 - **transfers:** Compose boundary-aware scatter-gather TDs (#76) ([58bff0d](https://github.com/wilsonborba/fah/commit/58bff0d56b5073e5a4b102f1aa774d4dfabbb546))
 - **raw:** Classify completions and expose ordering controls (#69, #77) ([c54888c](https://github.com/wilsonborba/fah/commit/c54888c7e9dccf91a1eb2788ea22e9f0642fe8c1))
 - **release:** Prepare v0.2.0 and require M8 guest evidence (#78) ([bc58d5e](https://github.com/wilsonborba/fah/commit/bc58d5e9ec6a7c36784f7ca02d73b8872fdb6c66))
+- **capabilities:** Decode PSI fields and record emulated M8 coverage (#73) ([38f3c9f](https://github.com/wilsonborba/fah/commit/38f3c9f72222bc623a26e9873a7e5b4d25f0cad1))
 
 ### Fixes
 - **tests:** Move the VM lab and test runners from scripts/ into tests/ (#64) ([c6b08ae](https://github.com/wilsonborba/fah/commit/c6b08ae88401a89cc7044c365e40bfdd30587c68))
 - **tests:** Discover all lab cases during direct execution (#72) ([7a019ac](https://github.com/wilsonborba/fah/commit/7a019ac68e51617a1b074f591e419623cbf4301e))
 - **release:** Derive lab and packaging branch from Cargo version (#71) ([804d307](https://github.com/wilsonborba/fah/commit/804d30724e1052aa5cd6bc542c864a975b957cae))
+- **lab:** Accept the explicitly expected stale-handle exit (#80) ([f129a05](https://github.com/wilsonborba/fah/commit/f129a05bc02ad1a79d1ae3d4c99714f10941e055))
+- **xhci:** Encode periodic intervals and advance FrameID in microframes (#81) ([c9f8aea](https://github.com/wilsonborba/fah/commit/c9f8aea2693ee33c1149d7a001683c3dfb870b22))
+- **hub:** Update slot hub fields through Configure Endpoint (#82) ([7758444](https://github.com/wilsonborba/fah/commit/7758444f868ca195534642d7c2093721d3b6114d))
+- **events:** Advance raw completion cursors beyond the first page (#83) ([e1e08fb](https://github.com/wilsonborba/fah/commit/e1e08fb741a2931df3013f0dcdc7dd3e441d31a9))
+- **raw:** Track scoped generations and require contextual reconcile proof (#84) ([0920003](https://github.com/wilsonborba/fah/commit/09200038f83b1c7056bba9199157082b0670edbf))
+- **raw:** Canonicalize physical ring identities and preserve owner Links (#85) ([729183b](https://github.com/wilsonborba/fah/commit/729183b06698c6c32f1f469382bfb4011b25a577))
+- **release:** Include M8 and topology validation reports in the candidate (#86) ([af21b12](https://github.com/wilsonborba/fah/commit/af21b12a7b28d6e855f87104c72bf65ead18df81))
+
+### Documentation
+- **release:** Generate v0.2.0 changelog (#78) ([26d8289](https://github.com/wilsonborba/fah/commit/26d82894115bd1dcc0defb16f9bef23ae54ade5c))
+
+### Validation
+- **lab:** Add isolated hub audio and UAS stream fixtures (#78) ([0f699f5](https://github.com/wilsonborba/fah/commit/0f699f5377f675fa153f9150a7022f34731aae86))
+- **hub:** Distinguish prepared context from QEMU output limitations (#82) ([8c9f4c7](https://github.com/wilsonborba/fah/commit/8c9f4c72b85e16b5378d31c0fa13b7963c2e6557))
+- **raw:** Isolate known reconcile proof from unknown DMA references (#84) ([255ba88](https://github.com/wilsonborba/fah/commit/255ba881548a5f908f1b8fa214917aad2e370131))
+- **raw:** Avoid shadowing the allocation inspection helper (#84) ([f925ea3](https://github.com/wilsonborba/fah/commit/f925ea32cb7d6e7f81d90c19448dd1beda001f9d))
 ## [0.1.0] - 2026-11-03
 
 ### Features
