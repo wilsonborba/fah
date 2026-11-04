@@ -169,13 +169,13 @@ class Cli:
         assert reclaimed==completed
         return completed
 
-    def quit(self):
+    def quit(self,expected_exit=0):
         if self.process.poll()is None:
             self.command({'op':'quit'})
             self.process.wait(timeout=10)
         self.errors.seek(0)
         errors=self.errors.read().decode(errors='replace')
-        assert self.process.returncode==0,dict(exit=self.process.returncode,stderr=errors)
+        assert self.process.returncode==expected_exit,dict(exit=self.process.returncode,expected_exit=expected_exit,stderr=errors)
         assert not errors,errors
 
 
@@ -624,6 +624,7 @@ def faults():
 
 def m8_behaviors():
     cli=Cli()
+    expected_exit=0
     def raw(action,**args):return cli.command({'op':'raw','request':dict(action=action,**args)})
     def case(name,**values):report('m8_case',name=name,verified=True,**values)
     def alloc(length):return raw('dma_alloc',bytes=length)['handle']
@@ -662,6 +663,27 @@ def m8_behaviors():
         cap=raw('inspect');assert cap['mapped_bytes']>=4096 and cap['protocols'],cap
         case('capabilities',capabilities=cap)
         raw('barrier');assert raw('timing')['physical_timing_guaranteed']is False
+        # Isolate known-command coherence proof from deliberately unknown raw traffic.
+        for port in cli.command({'op':'ports'}):
+            if not port['connected']:continue
+            prepared=cli.command({'op':'enumerate','port':port['id'],'configure':True})
+            slot=prepared['device']['slot']
+            break
+        # A known Evaluate Context with unchanged slot fields may reconcile.
+        snapshot=raw('slot_context',slot=slot)
+        context=alloc(33*cap['context_bytes'])
+        image=bytearray(33*cap['context_bytes']);struct.pack_into('<I',image,4,1)
+        for i,word in enumerate(snapshot['words']):struct.pack_into('<I',image,cap['context_bytes']+i*4,word)
+        raw('dma_write',handle=context,offset=0,bytes=list(image))
+        pointer=raw('dma_inspect',handle=context)['iova']
+        evaluated=raw('command',words=[pointer&0xffffffff,pointer>>32,0,(13<<10)|(slot<<24)])
+        assert evaluated['completion'][2]>>24==1,evaluated
+        reconciled=raw('reconcile',slot=slot)
+        assert reconciled['restored'] and reconciled['managed_state']=='coherent',reconciled
+        assert cli.command({'op':'ports'})
+        case('scoped_reconcile',generation=evaluated['coherence_generation'])
+        cli.command({'op':'close'});assert retained(cli)==0
+        cli.command({'op':'open','target':BDF});cli.command({'op':'init'})
         large=alloc(196608)
         raw('dma_write',handle=large,offset=65530,bytes=list(range(20)))
         assert raw('dma_read',handle=large,offset=65530,length=20)['bytes']==list(range(20))
@@ -724,15 +746,138 @@ def m8_behaviors():
             raw('drain',timeout_ms=1000)
         else:raise AssertionError('literal Noop completion missing')
         case('literal_noop',words=built)
-        retained=alloc(32)
-        assert raw('dma_unmap',handle=retained)['retained_until_close']
+        retained_handle=alloc(32)
+        assert raw('dma_unmap',handle=retained_handle)['retained_until_close']
         assert raw('reconcile')['managed_state']=='unknown'
         case('unknown_retention')
         cli.command({'op':'close'})
         cli.command({'op':'open','target':BDF});cli.command({'op':'init'})
-        rejected=cli.raw({'op':'raw','request':{'action':'dma_read','handle':retained,'offset':0,'length':1}})
+        rejected=cli.raw({'op':'raw','request':{'action':'dma_read','handle':retained_handle,'offset':0,'length':1}})
         assert rejected['outcome']['status']=='failed'
+        expected_exit=1
         case('session_handles')
+        cli.command({'op':'close'});assert cli.command({'op':'state'})['resources']['retained_allocations']==0
+    finally:cli.quit(expected_exit=expected_exit)
+
+
+def topology_behaviors():
+    """Disposable QEMU hub/audio/UAS fixtures; no host device access.
+
+    UAS IU layouts and pipe IDs follow QEMU v10.0.0 hw/usb/dev-uas.c.
+    """
+    cli=Cli()
+    def raw(action,**args):return cli.command({'op':'raw','request':dict(action=action,**args)})
+    def case(name,**values):report('topology_case',name=name,verified=True,**values)
+    def alloc(length):return raw('dma_alloc',bytes=length)['handle']
+    def write(handle,data):raw('dma_write',handle=handle,offset=0,bytes=list(data))
+    def read(handle,length):return bytes(raw('dma_read',handle=handle,offset=0,length=length)['bytes'])
+    def wait(address,since=0):
+        deadline=time.monotonic()+8
+        while time.monotonic()<deadline:
+            raw('drain',timeout_ms=1000)
+            for _,words in raw('events',since=since,limit=4096)['events']:
+                if (words[3]>>10)&63==32 and words[0]|(words[1]<<32)==address:
+                    assert words[2]>>24 in(1,13),words
+                    return words
+            time.sleep(.005)
+        raise AssertionError('topology transfer completion deadline')
+    def control(slot,request_type,request,value,index,length):
+        setup=struct.pack('<BBHHH',request_type,request,value,index,length)
+        first,second=struct.unpack('<II',setup)
+        trbs=[[first,second,8,(2<<10)|(1<<6)|((3 if request_type&128 else 2)<<16 if length else 0)]]
+        buffer=None
+        if length:
+            buffer=alloc(length);iova=raw('dma_inspect',handle=buffer)['iova']
+            trbs.append([iova&0xffffffff,iova>>32,length,(3<<10)|((1<<16)|(1<<2)if request_type&128 else 0)])
+        trbs.append([0,0,0,(4<<10)|(1<<5)|(0 if length and request_type&128 else 1<<16)])
+        result=raw('transfer',slot=slot,endpoint=0,trbs=trbs)
+        wait(result['trb_iovas'][-1])
+        return read(buffer,length)if buffer else b''
+    def descriptor(slot,kind,length):return bytes(raw('device_descriptor',slot=slot,kind=kind,length=length)['bytes'])
+    def fields(configuration):
+        result=[];offset=0
+        while offset<len(configuration):
+            length=configuration[offset];assert length>=2 and offset+length<=len(configuration)
+            result.append(configuration[offset:offset+length]);offset+=length
+        return result
+    def stream_submit(slot,endpoint,handle,length,stream):
+        address=raw('dma_inspect',handle=handle)['iova']
+        words=raw('normal_build',iova=address,length=length,max_packet=1024,input=bool(endpoint&128))['trbs'][0]
+        staged=raw('compose',words=words)['staged']
+        placed=raw('place',staged=staged,ring=dict(kind='stream',slot=slot,endpoint=endpoint,stream=stream))
+        raw('publish',token=placed['publish_token'])
+        dci=(endpoint&15)*2+int(bool(endpoint&128))
+        raw('doorbell',slot=slot,endpoint=dci,stream=stream)
+        return placed['trb_iova']
+    try:
+        cli.command({'op':'open','target':BDF});cli.command({'op':'init'})
+        capabilities=raw('inspect');roots=[]
+        for port in cli.command({'op':'ports'}):
+            if not port['connected']:continue
+            value=cli.command({'op':'enumerate','port':port['id'],'configure':False})
+            desc=next(s['result']['bytes']for s in value['steps']if s['operation']=='device_descriptor')
+            config=bytes(next(s['result']['bytes']for s in value['steps']if s['operation']=='configuration_body'))
+            roots.append(dict(slot=value['device']['slot'],port=port,descriptor=desc,configuration=config))
+        hub=next(d for d in roots if d['descriptor'][4]==9)
+        uas=next(d for d in roots if any(f[1]==4 and len(f)>=9 and f[5]==8 and f[7]==0x62 for f in fields(d['configuration'])))
+        hubslot=hub['slot'];rootport=hub['port']['id']['number']
+        raw('device_configuration',slot=hubslot,value=hub['configuration'][5])
+        hubdesc=control(hubslot,0xa0,6,0x2900,0,9)
+        raw('hub_configure',slot=hubslot,root_port=rootport,ports=hubdesc[2])
+        context=raw('slot_context',slot=hubslot)
+        prepared=context['input_words'];output=context['words']
+        assert prepared[0]&(1<<26) and prepared[1]>>24==hubdesc[2],context
+        hub_fields_persisted=bool(output[0]&(1<<26) and output[1]>>24==hubdesc[2])
+        control(hubslot,0x23,3,8,1,0) # Explicit downstream PORT_POWER.
+        control(hubslot,0x23,3,4,1,0) # Explicit downstream PORT_RESET.
+        deadline=time.monotonic()+3
+        while True:
+            status=struct.unpack('<HH',control(hubslot,0xa3,0,0,1,4))[0]
+            if status&3==3 and not status&16:break
+            assert time.monotonic()<deadline,status
+            time.sleep(.02)
+        speed=2 if status&(1<<9)else 3 if status&(1<<10)else 1
+        child=raw('slot_enable')['slot']
+        raw('address_route',slot=child,root_port=rootport,speed=speed,route=1,parent_slot=hubslot if hub['port']['speed_code']==3 else 0,parent_port=1)
+        prefix=descriptor(child,1,8);raw('device_packet_size',slot=child,size=prefix[7])
+        full=descriptor(child,1,18);assert len(full)==18
+        header=descriptor(child,2,9);configuration=descriptor(child,2,int.from_bytes(header[2:4],'little'))
+        case('hub_route',root_port=rootport,child=child,descriptor=list(full),input_context_verified=True,output_hub_fields_persisted=hub_fields_persisted,model_limitation=None if hub_fields_persisted else 'QEMU configure_slot only copies Context Entries; physical Hub/NumPorts persistence unvalidated')
+        interfaces=[f for f in fields(configuration)if f[1]==4 and len(f)>=9]
+        audio=next(f for f in interfaces if f[3]>0 and f[5:7]==bytes([1,2]))
+        raw('device_configuration',slot=child,value=configuration[5])
+        raw('device_interface',slot=child,interface=audio[2],alternate=audio[3])
+        endpoints=raw('endpoint_configure',slot=child,interface=audio[2],alternate=audio[3],configuration=list(configuration))['endpoints']
+        iso=next(ep for ep in endpoints if ep['transfer_type']=='isochronous' and ep['direction']=='out')
+        raw('iso_schedule',slot=child,endpoint=iso['address'],asap=True,frame_id=0)
+        audio_buffer=alloc(iso['max_packet_size']);pointer=raw('dma_inspect',handle=audio_buffer)['iova']
+        trb=[pointer&0xffffffff,pointer>>32,iso['max_packet_size'],(5<<10)|(1<<5)|(1<<31)]
+        result=raw('transfer',slot=child,endpoint=iso['address'],trbs=[trb])
+        event=wait(result['trb_iovas'][-1]);case('isochronous',words=event,packet=iso['max_packet_size'])
+        slot=uas['slot'];configuration=uas['configuration']
+        raw('device_configuration',slot=slot,value=configuration[5])
+        interface=next(f for f in fields(configuration)if f[1]==4 and f[5]==8 and f[7]==0x62)
+        endpoints=raw('endpoint_configure',slot=slot,interface=interface[2],alternate=interface[3],configuration=list(configuration))['endpoints']
+        pipes={};stream_caps={};endpoint=None
+        for field in fields(configuration):
+            if field[1]==5:endpoint=field[2]
+            elif field[1]==0x24 and len(field)==4:pipes[field[2]]=endpoint
+            elif field[1]==0x30 and endpoint is not None:stream_caps[endpoint]=field[3]&31
+        assert capabilities['streams_supported'] and all(pipe in pipes for pipe in(1,2,3,4)),(capabilities,pipes)
+        for pipe in(2,3,4):raw('stream_configure',slot=slot,endpoint=pipes[pipe],entries=4,device_max_streams=stream_caps[pipes[pipe]])
+        sense=alloc(64);data=alloc(36)
+        sense_trb=stream_submit(slot,pipes[2],sense,64,1)
+        data_trb=stream_submit(slot,pipes[3],data,36,1)
+        # QEMU command IU header +28-byte body; tag1 selects stream1.
+        iu=bytes([1,0,0,1])+bytes(12)+bytes([0x12,0,0,0,36,0])+bytes(10)
+        command=alloc(len(iu));write(command,iu);pointer=raw('dma_inspect',handle=command)['iova']
+        words=raw('normal_build',iova=pointer,length=len(iu),max_packet=1024,input=False)['trbs']
+        result=raw('transfer',slot=slot,endpoint=pipes[1],trbs=words)
+        wait(result['trb_iovas'][-1]);wait(data_trb);wait(sense_trb)
+        inquiry=read(data,36);status=read(sense,16)
+        assert inquiry[8:12]==b'QEMU',inquiry
+        assert status[0]==3 and status[2:4]==bytes([0,1])and status[6]==0,status
+        case('stream_inquiry',stream_id=1,inquiry=list(inquiry),status=list(status))
         cli.command({'op':'close'});assert cli.command({'op':'state'})['resources']['retained_allocations']==0
     finally:cli.quit()
 
@@ -740,7 +885,9 @@ def m8_behaviors():
 def main():
     report('start', suite=sys.argv[1], run_id=pathlib.Path('/run-id').read_text())
     metadata()
-    if sys.argv[1]=='m8':
+    if sys.argv[1]=='topology':
+        topology_behaviors()
+    elif sys.argv[1]=='m8':
         m8_behaviors()
     elif sys.argv[1]=='faults':
         faults()

@@ -1,7 +1,7 @@
 """Shared version and branch contract for the lab and release tools."""
 import tomllib
 
-M8_CASES = {'capabilities', 'dma_large', 'scatter_read10', 'bei_drain', 'literal_noop', 'unknown_retention', 'session_handles'}
+M8_CASES = {'scoped_reconcile', 'capabilities', 'dma_large', 'scatter_read10', 'bei_drain', 'literal_noop', 'unknown_retention', 'session_handles'}
 
 
 def package_version(root):
@@ -20,3 +20,5 @@ def require_clean_release(root, command):
     if command('git', '-C', str(root), 'status', '--porcelain'):
         raise ValueError(f'release operation requires clean {expected}; commit changes first')
     return version
+
+TOPOLOGY_CASES = {'hub_route', 'isochronous', 'stream_inquiry'}

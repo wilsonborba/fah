@@ -165,10 +165,15 @@ def verified_runs(paths, commit, binary_hash):
             cases={row.get('name')for row in validation['cases']if row.get('verified')}
             if not validation['verified'] or not validation['independent_trace'] or not RELEASE_CONTEXT.M8_CASES.issubset(cases):
                 raise ValueError('M8 guest evidence incomplete')
+        if result['suite']=='topology':
+            validation=json.loads((path/'topology-validation.json').read_text())
+            cases={row.get('name')for row in validation['cases']if row.get('verified')}
+            if not validation['verified'] or not validation['independent_trace'] or not RELEASE_CONTEXT.TOPOLOGY_CASES.issubset(cases):
+                raise ValueError('topology guest evidence incomplete')
         runs.append(dict(id=path.name, suite=result['suite'], commit=commit, binary_sha256=binary_hash, _path=path))
     suites = [run['suite'] for run in runs]
-    if tuple(map(int,RELEASE_CONTEXT.package_version(ROOT).split('.')[:2]))>=(0,2) and 'm8'not in suites:
-        raise ValueError('M8 release requires fresh M8 guest evidence')
+    if tuple(map(int,RELEASE_CONTEXT.package_version(ROOT).split('.')[:2]))>=(0,2) and not {'m8','topology'}.issubset(suites):
+        raise ValueError('M8 release requires fresh M8 and topology guest evidence')
     if len({run['id'] for run in runs}) != len(runs) or suites.count('smoke') < 2 or not {'feasibility', 'fixture', 'explicit', 'faults'}.issubset(suites):
         raise ValueError('candidate requires distinct fresh feasibility/fixture/smoke/smoke/explicit/faults runs')
     return runs
@@ -247,7 +252,7 @@ def package(output, evidence, metadata, records, sources):
             shutil.copy2(text['_path'], destination / text['name'])
     (stage / 'dependency-licenses.json').write_text(json.dumps([public_record(record) for record in records], indent=2, ensure_ascii=False) + '\n')
     (stage / 'capabilities.json').write_text(json.dumps(capabilities, indent=2) + '\n')
-    evidence_files = ['manifest.json', 'command.json', 'result.json', 'serial.log', 'events.json', 'xhci.trace', 'pci.json', 'qemu.stderr', 'trace-validation.json', 'failure-matrix.json']
+    evidence_files = ['manifest.json', 'command.json', 'result.json', 'serial.log', 'events.json', 'xhci.trace', 'pci.json', 'qemu.stderr', 'trace-validation.json', 'failure-matrix.json', 'm8-validation.json', 'topology-validation.json']
     for run in runs:
         destination = stage / 'evidence' / run['id']
         destination.mkdir(parents=True)
@@ -265,9 +270,13 @@ Binary SHA256: {binary_hash}
 Target: {TARGET}; tested Rust1.91.1 / Debian13 userspace.
 
 The candidate includes the executable, source snapshot, maintained patches,
-license texts/notices, provenance/checksums and six fresh guest runs from this exact
+license texts/notices, provenance/checksums and {len(runs)} fresh guest runs from this exact
 commit/binary. It validates control/bulk/interrupt I/O, eleven independent trace
-windows and eleven fault/recovery cases. See README and evidence manifests.
+windows and eleven fault/recovery cases, literal publication and interrupt-free drain,
+scoped reconciliation, chained large transfers, downstream audio isochronous I/O
+and UAS primary-stream INQUIRY/status. Hub input fields are verified; QEMU does
+not persist output Hub/NumPorts fields, which remains a physical evidence gap.
+See README and evidence manifests.
 
 Before the dependency inventory and again after a clean build with the pinned
 toolchain, the packaging tool compared every file of the prepared CrabUSB and

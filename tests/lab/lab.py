@@ -216,8 +216,12 @@ def run(lab, suite, evidence=EVIDENCE):
     qmp_path=runtime/'qmp.sock'
     trace_path=run_dir/'xhci.trace'
     trace_events=run_dir/'trace-events'
-    trace_events.write_text('\n'.join(['usb_xhci_port_write','usb_xhci_runtime_write','usb_xhci_oper_write','usb_xhci_irq_msix','usb_xhci_fetch_trb','usb_xhci_slot_enable','usb_xhci_slot_address','usb_xhci_slot_configure','usb_xhci_port_reset','usb_xhci_ep_stop','usb_xhci_ep_reset','usb_xhci_ep_set_dequeue','usb_xhci_xfer_success','usb_xhci_xfer_error','usb_xhci_queue_event'])+'\n')
+    trace_events.write_text('\n'.join(['usb_xhci_doorbell_write','usb_xhci_port_write','usb_xhci_runtime_write','usb_xhci_oper_write','usb_xhci_irq_msix','usb_xhci_fetch_trb','usb_xhci_slot_enable','usb_xhci_slot_address','usb_xhci_slot_configure','usb_xhci_port_reset','usb_xhci_ep_stop','usb_xhci_ep_reset','usb_xhci_ep_set_dequeue','usb_xhci_xfer_success','usb_xhci_xfer_error','usb_xhci_queue_event'])+'\n')
     args = ['qemu-system-x86_64' , '-machine', MACHINE + ',accel=kvm,kernel-irqchip=split', '-cpu', 'host', '-m', '2048', '-smp', '2', '-nodefaults', '-display', 'none', '-no-reboot', '-serial', 'stdio', '-monitor', 'none', '-kernel', str(lab / 'kernel'), '-initrd', str(lab / 'initramfs.gz'), '-append', 'console=ttyS0 rdinit=/init intel_iommu=on iommu.strict=1 panic=-1 fah_suite=' + suite, '-fw_cfg', 'name=opt/fah-lab,string=' + manifest['run_id'], '-device', 'intel-iommu,intremap=on,caching-mode=on,device-iotlb=on', '-device', 'qemu-xhci,id=xhci,addr=02.0,p2=4,p3=4', '-device','usb-kbd,id=keyboard,bus=xhci.0,port=1','-drive',f'if=none,id=usbdata,format=raw,file={disk}','-device','usb-storage,id=storage,bus=xhci.0,port=2,drive=usbdata','-qmp',f'unix:{qmp_path},server=on,wait=off','-trace',f'events={trace_events},file={trace_path}']
+    if suite=='topology':
+        uas=runtime/'synthetic-uas.raw'
+        with uas.open('wb')as fixture:fixture.write(bytes(range(256))*2);fixture.truncate(8*1024*1024)
+        args+=['-device','usb-hub,id=hub,bus=xhci.0,port=3','-audiodev','none,id=silence','-device','usb-audio,id=audio,bus=xhci.0,port=3.1,audiodev=silence','-device','usb-uas,id=uas,bus=xhci.0,port=4','-drive',f'if=none,id=uasdata,format=raw,file={uas}','-device','scsi-hd,bus=uas.0,drive=uasdata']
     (run_dir / 'command.json').write_text(json.dumps(args, indent=2))
     result = False
     events = []
@@ -285,6 +289,12 @@ def run(lab, suite, evidence=EVIDENCE):
             normal_lengths=[int(size,16)&0x1ffff for kind,size in re.findall(r'usb_xhci_fetch_trb addr 0x[0-9a-f]+, ([A-Z_]+), p 0x[0-9a-f]+, s 0x([0-9a-f]+)',text) if kind=='TR_NORMAL']
             result=any(normal_lengths[i:i+3]==[256,65536,65280]for i in range(len(normal_lengths)))
         (run_dir/'m8-validation.json').write_text(json.dumps({'verified':result,'cases':rows,'independent_trace':True},indent=2))
+    if suite=='topology' and result:
+        rows=[event for event in events if event['kind']=='topology_case']
+        text=trace_path.read_text()
+        trace_verified='TR_ISOCH' in text and bool(re.search(r'usb_xhci_doorbell_write[^\n]*0x000100[0-9a-f]{2}',text))
+        result=trace_verified and RELEASE_CONTEXT.TOPOLOGY_CASES.issubset({row.get('name')for row in rows if row.get('verified')})
+        (run_dir/'topology-validation.json').write_text(json.dumps({'verified':result,'cases':rows,'independent_trace':trace_verified},indent=2))
     if suite=='faults':
         matrix=[event for event in events if event['kind']=='fault_case']
         (run_dir/'failure-matrix.json').write_text(json.dumps(matrix,indent=2))
@@ -405,7 +415,7 @@ def main():
     parser.add_argument('action', choices=['plan', 'prepare', 'run','stop','cleanup'])
     parser.add_argument('--lab', type=pathlib.Path, default=DEFAULT_LAB)
     parser.add_argument('--kernel-root',type=pathlib.Path,default=pathlib.Path('/'),help='installed / or privately extracted/depmod-prepared Debian guest kernel root')
-    parser.add_argument('--suite', choices=['feasibility','fixture','smoke','explicit','faults','m8'], default='feasibility')
+    parser.add_argument('--suite', choices=['feasibility','fixture','smoke','explicit','faults','m8','topology'], default='feasibility')
     parser.add_argument('--run',help='single generated run directory name for stop/cleanup')
     args = parser.parse_args()
     lab = safe_lab(args.lab)

@@ -15,6 +15,14 @@ spec.loader.exec_module(guest)
 
 
 class GuestMetadata(unittest.TestCase):
+    def test_expected_negative_cli_exit_is_explicit_and_not_silently_accepted(self):
+        import io
+        client=guest.Cli.__new__(guest.Cli)
+        client.errors=io.BytesIO()
+        client.process=MagicMock(returncode=1)
+        client.process.poll.return_value=1
+        client.quit(expected_exit=1)
+        with self.assertRaises(AssertionError):client.quit()
     def run_probe(self, bad_index=8, error=errno.EINVAL):
         reports = []
 

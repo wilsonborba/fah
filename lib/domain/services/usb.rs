@@ -32,6 +32,7 @@ pub struct DeviceSnapshot {
 }
 pub struct UsbSession<B: DeviceBackend> {
     pub session: Session<B>,
+    pub(crate) raw_coherence: crate::domain::models::raw::Coherence,
     pub(crate) recoverable_stall: Option<super::recovery::RecoverableStall>,
     ports: Option<Ports>,
     reset_ports: BTreeMap<u8, PortId>,
@@ -46,6 +47,7 @@ impl<B: DeviceBackend> UsbSession<B> {
     pub fn new(backend: B, identity: u64) -> Self {
         Self {
             session: Session::new(backend, identity),
+            raw_coherence: Default::default(),
             recoverable_stall: None,
             ports: None,
             reset_ports: BTreeMap::new(),
@@ -168,6 +170,11 @@ impl<B: DeviceBackend> UsbSession<B> {
         self.devices.values().cloned().collect()
     }
     pub fn device(&self, id: DeviceId) -> Result<&DeviceSnapshot, OperationError> {
+        if self.raw_coherence.slots.contains_key(&id.slot) {
+            return Err(OperationError::validation(
+                "slot requires raw reconciliation",
+            ));
+        }
         let device = self
             .devices
             .get(&id.slot)
@@ -231,6 +238,7 @@ impl<B: DeviceBackend> UsbSession<B> {
     }
     pub fn close(&mut self) -> Result<(), OperationError> {
         self.session.close()?;
+        self.raw_coherence = Default::default();
         self.ports = None;
         self.devices.clear();
         self.reset_ports.clear();
