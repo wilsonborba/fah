@@ -80,6 +80,20 @@ impl LocalController {
         request: Op,
     ) -> Result<Value, OperationError> {
         match request {
+            Op::DevicePacketSize { slot, size } => {
+                use crate::domain::services::usb::ConfigurationBackend;
+                self.ep0_packet_size(slot, size)?;
+                Ok(json!({"size":size,"managed_state":"unknown"}))
+            }
+            Op::DeviceInterface {
+                slot,
+                interface,
+                alternate,
+            } => {
+                use crate::domain::services::usb::ConfigurationBackend;
+                self.set_interface(slot, interface, alternate)?;
+                Ok(json!({"interface":interface,"alternate":alternate,"managed_state":"unknown"}))
+            }
             Op::Barrier => {
                 std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
                 Ok(json!({"barrier":"seq_cst","packet_timing_guaranteed":false}))
