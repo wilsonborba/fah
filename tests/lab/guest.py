@@ -746,13 +746,13 @@ def m8_behaviors():
             raw('drain',timeout_ms=1000)
         else:raise AssertionError('literal Noop completion missing')
         case('literal_noop',words=built)
-        retained=alloc(32)
-        assert raw('dma_unmap',handle=retained)['retained_until_close']
+        retained_handle=alloc(32)
+        assert raw('dma_unmap',handle=retained_handle)['retained_until_close']
         assert raw('reconcile')['managed_state']=='unknown'
         case('unknown_retention')
         cli.command({'op':'close'})
         cli.command({'op':'open','target':BDF});cli.command({'op':'init'})
-        rejected=cli.raw({'op':'raw','request':{'action':'dma_read','handle':retained,'offset':0,'length':1}})
+        rejected=cli.raw({'op':'raw','request':{'action':'dma_read','handle':retained_handle,'offset':0,'length':1}})
         assert rejected['outcome']['status']=='failed'
         expected_exit=1
         case('session_handles')
