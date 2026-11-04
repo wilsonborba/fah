@@ -803,8 +803,10 @@ def topology_behaviors():
         raw('device_configuration',slot=hubslot,value=hub['configuration'][5])
         hubdesc=control(hubslot,0xa0,6,0x2900,0,9)
         raw('hub_configure',slot=hubslot,root_port=rootport,ports=hubdesc[2])
-        context=raw('slot_context',slot=hubslot)['words']
-        assert context[0]&(1<<26) and context[1]>>24==hubdesc[2],context
+        context=raw('slot_context',slot=hubslot)
+        prepared=context['input_words'];output=context['words']
+        assert prepared[0]&(1<<26) and prepared[1]>>24==hubdesc[2],context
+        hub_fields_persisted=bool(output[0]&(1<<26) and output[1]>>24==hubdesc[2])
         control(hubslot,0x23,3,8,1,0) # Explicit downstream PORT_POWER.
         control(hubslot,0x23,3,4,1,0) # Explicit downstream PORT_RESET.
         deadline=time.monotonic()+3
@@ -819,7 +821,7 @@ def topology_behaviors():
         prefix=descriptor(child,1,8);raw('device_packet_size',slot=child,size=prefix[7])
         full=descriptor(child,1,18);assert len(full)==18
         header=descriptor(child,2,9);configuration=descriptor(child,2,int.from_bytes(header[2:4],'little'))
-        case('hub_route',root_port=rootport,child=child,descriptor=list(full))
+        case('hub_route',root_port=rootport,child=child,descriptor=list(full),input_context_verified=True,output_hub_fields_persisted=hub_fields_persisted,model_limitation=None if hub_fields_persisted else 'QEMU configure_slot only copies Context Entries; physical Hub/NumPorts persistence unvalidated')
         interfaces=[f for f in fields(configuration)if f[1]==4 and len(f)>=9]
         audio=next(f for f in interfaces if f[3]>0 and f[5:7]==bytes([1,2]))
         raw('device_configuration',slot=child,value=configuration[5])

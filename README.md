@@ -513,6 +513,9 @@ and MMIO. These are implementation budgets, not claimed xHCI hardware limits.
 
 Release suites exercise the emulated controller with a downstream USB audio device,
 a hub, and a SuperSpeed UAS device. They check isochronous completion, routed
-descriptors, stream INQUIRY data and status, and large chained transfers. Independent
+descriptors, stream INQUIRY data and status, and large chained transfers. QEMU 10
+only copies Context Entries during Configure Endpoint: hub input fields and the
+emitted command are checked, while output Hub/NumPorts persistence remains
+unvalidated on hardware. Independent
 xHCI traces accompany guest assertions. Physical Intel behavior and the separate
 case study remain in M7; emulated success does not establish physical timing.
