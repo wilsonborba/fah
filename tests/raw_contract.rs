@@ -34,6 +34,14 @@ fn protocol_parser_preserves_psi_and_unknown_capabilities() {
     assert_eq!(parsed.len(), 1);
     assert_eq!(parsed[0].speeds, vec![0x12345678]);
     assert_eq!(parsed[0].first_port, 2);
+    assert_eq!(parsed[0].ports, vec![2, 3, 4, 5]);
+    let speed = ProtocolSpeed::decode((5 << 16) | (1 << 8) | (3 << 4) | 4);
+    assert_eq!(speed.bits_per_second, 5_000_000_000);
+    assert_eq!(speed.id, 4);
+    assert!(speed.full_duplex);
+    let reserved = ProtocolSpeed::decode((3 << 14) | (3 << 6));
+    assert_eq!(reserved.link_protocol, 3);
+    assert_eq!(reserved.kind, 3);
     assert!(protocols(&bytes[..63]).is_err());
 }
 

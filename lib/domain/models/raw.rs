@@ -300,6 +300,33 @@ pub fn scatter_td(
 }
 
 #[derive(Debug, Serialize)]
+pub struct ProtocolSpeed {
+    pub raw: u32,
+    pub id: u8,
+    pub exponent: u8,
+    pub kind: u8,
+    pub full_duplex: bool,
+    pub link_protocol: u8,
+    pub mantissa: u16,
+    pub bits_per_second: u64,
+}
+impl ProtocolSpeed {
+    pub fn decode(raw: u32) -> Self {
+        let exponent = ((raw >> 4) & 3) as u8;
+        let mantissa = (raw >> 16) as u16;
+        Self {
+            raw,
+            id: (raw & 15) as u8,
+            exponent,
+            kind: ((raw >> 6) & 3) as u8,
+            full_duplex: raw & (1 << 8) != 0,
+            link_protocol: ((raw >> 14) & 3) as u8,
+            mantissa,
+            bits_per_second: mantissa as u64 * 1000u64.pow(exponent as u32),
+        }
+    }
+}
+#[derive(Debug, Serialize)]
 pub struct Protocol {
     pub offset: usize,
     pub revision: u16,
@@ -308,6 +335,8 @@ pub struct Protocol {
     pub port_count: u8,
     pub slot_type: u8,
     pub speeds: Vec<u32>,
+    pub speed_ids: Vec<ProtocolSpeed>,
+    pub ports: Vec<u8>,
     pub raw: Vec<u32>,
 }
 pub fn protocols(bytes: &[u8]) -> Result<Vec<Protocol>, OperationError> {
@@ -348,6 +377,14 @@ pub fn protocols(bytes: &[u8]) -> Result<Vec<Protocol>, OperationError> {
                 port_count,
                 slot_type: (raw[3] & 31) as u8,
                 speeds: raw[4..].to_vec(),
+                speed_ids: raw[4..]
+                    .iter()
+                    .copied()
+                    .map(ProtocolSpeed::decode)
+                    .collect(),
+                ports: (first_port as u16..first_port as u16 + port_count as u16)
+                    .map(|p| p as u8)
+                    .collect(),
                 raw,
             });
         }
