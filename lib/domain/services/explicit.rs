@@ -39,6 +39,7 @@ impl<B: ExplicitBackend> UsbSession<B> {
                 | Op::Doorbell { .. }
                 | Op::Command { .. }
                 | Op::Transfer { .. }
+                | Op::ScatterTransfer { .. }
         ) {
             // A partial backend failure must not restore a stale managed view.
             self.session.recovery_required();

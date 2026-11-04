@@ -75,3 +75,21 @@ fn stream_capabilities_and_device_limits_are_not_invented() {
         serde_json::from_str(r#"{"kind":"stream","slot":2,"endpoint":129,"stream":3}"#).unwrap();
     assert!(matches!(ring, Ring::Stream { stream: 3, .. }));
 }
+
+#[test]
+fn scatter_td_counts_packets_across_noncontiguous_segments() {
+    let trbs = scatter_td(&[(0x1ff00, 300), (0x50000, 800), (0x90000, 436)], 512, true).unwrap();
+    assert_eq!(trbs.len(), 4); // first buffer splits at64KiB.
+    assert_eq!(
+        trbs.iter()
+            .map(|t| (t[2] & 0x1ffff) as usize)
+            .sum::<usize>(),
+        1536
+    );
+    assert_eq!((trbs[0][2] >> 17) & 31, 3);
+    assert_eq!((trbs[1][2] >> 17) & 31, 3);
+    assert_eq!((trbs[2][2] >> 17) & 31, 1);
+    assert_eq!((trbs[3][2] >> 17) & 31, 0);
+    assert!(trbs[..3].iter().all(|t| t[3] & 16 != 0 && t[3] & 32 == 0));
+    assert_ne!(trbs[3][3] & 32, 0);
+}

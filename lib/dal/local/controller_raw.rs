@@ -77,6 +77,46 @@ impl LocalController {
         request: Op,
     ) -> Result<Value, OperationError> {
         match request {
+            Op::NormalBuild {
+                iova,
+                length,
+                max_packet,
+                input,
+            } => {
+                let trbs = crate::domain::models::raw::normal_td(iova, length, max_packet, input)?;
+                Ok(json!({"trbs":trbs,"executed":false}))
+            }
+            Op::ScatterTransfer {
+                slot,
+                endpoint,
+                segments,
+                max_packet,
+                input,
+            } => {
+                let mut addresses = Vec::new();
+                for segment in segments {
+                    let lease = self.raw_lease(segment.handle, session)?;
+                    if segment
+                        .offset
+                        .checked_add(segment.length)
+                        .is_none_or(|end| end as u64 > lease.length)
+                    {
+                        return Err(OperationError::validation(
+                            "scatter segment outside DMA lease",
+                        ));
+                    }
+                    addresses.push((lease.iova + segment.offset as u64, segment.length));
+                }
+                let trbs = crate::domain::models::raw::scatter_td(&addresses, max_packet, input)?;
+                self.execute_raw(
+                    session,
+                    Op::Transfer {
+                        slot,
+                        endpoint,
+                        trbs,
+                    },
+                )
+            }
             Op::StreamConfigure {
                 slot,
                 endpoint,
